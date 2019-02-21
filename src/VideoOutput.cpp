@@ -288,7 +288,7 @@ void VideoOutput::push_frame(TreePtr tree) {
 
     // Update layout and get tree and canvas bounding boxes
     tree->update_layout();
-    SkRect tree_bb = tree->get_bounding_box();
+    SkRect tree_bb = tree->bounding_box();
     SkRect window = SkRect::MakeIWH(d_->img_info.width(), d_->img_info.height()).makeInset(10, 10);
 
     // Adjust transformation to center tree

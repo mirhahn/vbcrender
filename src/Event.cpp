@@ -27,7 +27,7 @@ SetCategoryEvent::SetCategoryEvent(size_t seq, double time, size_t node_seq, siz
 
 
 void SetCategoryEvent::apply(TreePtr tree) {
-    old_category = tree->node(node_seq)->get_category();
+    old_category = tree->node(node_seq)->category();
     tree->set_category(node_seq, new_category);
 }
 
@@ -47,8 +47,8 @@ SetInfoEvent::SetInfoEvent(size_t seq, double time, size_t node_seq, const std::
 
 void SetInfoEvent::apply(TreePtr tree) {
     NodePtr node = tree->node(node_seq);
-    old_main_info = node->get_main_info();
-    old_general_info = node->get_general_info();
+    old_main_info = node->main_info();
+    old_general_info = node->general_info();
     node->set_info(main_info, general_info);
 }
 
@@ -88,11 +88,11 @@ SetBoundEvent::SetBoundEvent(size_t seq, double time, BoundType which, double bo
 
 void SetBoundEvent::apply(TreePtr tree) {
     if(which == BoundType::Lower) {
-        old_bound = tree->get_lower_bound();
+        old_bound = tree->lower_bound();
         tree->set_lower_bound(new_bound);
     }
     else {
-        old_bound = tree->get_upper_bound();
+        old_bound = tree->upper_bound();
         tree->set_upper_bound(new_bound);
     }
 }

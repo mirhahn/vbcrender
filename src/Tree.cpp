@@ -1,273 +1,394 @@
+#include <stack>
+
 #include <SkPaint.h>
 
 #include "Styles.hpp"
 #include "Tree.hpp"
 
-Node::Node(size_t seqnum, NodePtr  parent, size_t category)
-    : seqnum(seqnum),
-      category(category),
-      parent(parent),
-      main_info(),
-      general_info()
-{
-    // Calculate depth of node
-    depth = parent ? parent->get_depth() + 1 : 0;
+Node::Node(size_t seqnum)
+    : s_(seqnum),
+      d_(0),
+      cat_(0),
+      catoffs_(std::numeric_limits<size_t>::max()),
+      edgeoffs_(std::numeric_limits<size_t>::max())
+{}
+
+
+void Node::set_parent(NodePtr parent) {
+    // Must be leaf node
+    if(lchld_) {
+        throw std::logic_error("cannot adopt inner node");
+    }
+
+    // Remove from previous parent
+    NodePtr p = p_.lock();
+    if(p) {
+        // Find parent and immediate siblings
+        NodePtr sl = sibling_left();
+        NodePtr sr = sibling_right();
+        
+        // Remove node from child list
+        if(sl) {
+            sl->rsibl_ = sr;
+        }
+        else {
+            p->lchld_ = sr;
+        }
+
+        if(sr) {
+            sr->lsibl_ = sl;
+        }
+        else {
+            p->rchld_ = sl;
+        }
+
+        lsibl_.reset();
+        rsibl_.reset();
+    }
+
+    // Append to children of new parent
+    if(parent) {
+        // Make right sibling of rightmost child
+        NodePtr lsibl = parent->rchld_.lock();
+        lsibl_ = lsibl;
+        if(lsibl) {
+            lsibl->rsibl_ = shared_from_this();
+        }
+
+        // Make tail and (possibly) head of parent's child list
+        parent->rchld_ = shared_from_this();
+        if(!parent->lchld_) {
+            parent->lchld_ = shared_from_this();
+        }
+
+        p_ = parent;
+        d_ = parent->d_ + 1;
+    }
 }
 
 
 void Node::set_info(const std::string& main, const std::string& general) {
-    main_info = main;
-    general_info = general;
+    minfo_ = main;
+    ginfo_ = general;
 }
 
 
 void Node::add_info(const std::string& main, const std::string& general) {
-    main_info += main;
-    general_info += general;
+    minfo_ += main;
+    ginfo_ += general;
 }
 
 
 void Node::strip_info(const std::string& main, const std::string& general) {
-    main_info = main_info.substr(0, main_info.size() - main.size());
-    general_info = general_info.substr(0, general_info.size() - general.size());
+    minfo_ = minfo_.substr(0, minfo_.size() - main.size());
+    ginfo_ = ginfo_.substr(0, ginfo_.size() - general.size());
 }
 
 
-Edge::Edge(NodePtr parent, NodePtr child)
-    : parent(parent),
-      child(child)
-{}
-
-
 Tree::Tree()
-    : upper_bound(std::numeric_limits<double>::infinity()),
-      lower_bound(-std::numeric_limits<double>::infinity()),
-      category_index(node_style_table.size()),
-      node_points(node_style_table.size()),
-      layout_stale(true),
-      bounding_box()
+    : lb_(-std::numeric_limits<double>::infinity()),
+      ub_(std::numeric_limits<double>::infinity()),
+      stale_(true),
+      bbox_(),
+      np_(node_style_table.size())
 {}
 
 
 void Tree::add_node(size_t seqnum, size_t parent_seqnum, size_t category) {
+    NodePtr parent;
+
     // Validate data
-    if(!seqnum) {
-        throw std::out_of_range("invalid node sequence number");
+    if(seqnum < index_.size() && index_[seqnum]) {
+        throw std::invalid_argument("assigned or reserved sequence number");
     }
-    else if(category >= category_index.size()) {
-        throw std::out_of_range("invalid node cateogry");
+    if(parent_seqnum > 0 && (parent_seqnum >= index_.size() || !(parent = index_[parent_seqnum]))) {
+        throw std::invalid_argument("unknown parent sequence number");
+    }
+    if(category >= np_.size()) {
+        throw std::invalid_argument("unknown category code");
+    }
+    if(!parent && root_) {
+        throw std::invalid_argument("cannot create multiple roots");
     }
 
-    // Find parent node
-    NodePtr parent = parent_seqnum ? nodes.at(offset_table.at(parent_seqnum)) : nullptr;
-
-    // Create new node object and insert it
-    NodePtr node = std::make_shared<Node>(seqnum, parent, category);
-    size_t offset = nodes.size();
-    nodes.push_back(node);
-
-    // Insert node into offset table
-    if(offset_table.size() <= seqnum) {
-        offset_table.resize(seqnum + 1, std::numeric_limits<size_t>::max());
+    // Create new node and assign parent
+    NodePtr node = std::make_shared<Node>(seqnum);
+    node->set_parent(parent);
+    if(!parent) {
+        root_ = node;
     }
-    offset_table[seqnum] = offset;
 
-    // Insert node into depth index
-    if(depth_index.size() <= node->get_depth()) {
-        depth_index.resize(node->get_depth() + 1);
+    // Enter node into sequence index
+    if(index_.size() <= seqnum) {
+        index_.resize(seqnum + 1);
     }
-    node->depth_offset = depth_index[node->get_depth()].size();
-    depth_index[node->get_depth()].push_back(offset);
+    index_[seqnum] = node;
 
-    // Insert node into category index
-    node->category_offset = category_index[category].size();
-    category_index[category].push_back(offset);
+    // Allocate new coordinate pair and set category
+    size_t offset = np_[category].size();
+    np_[category].emplace_back();
+    node->set_category(category, offset);
 
-    // Add coordinate structure
-    node_points[category].emplace_back();
-
-    // Create edge if necessary
+    // Allocate new edge
     if(parent) {
-        edges.push_back(std::make_shared<Edge>(parent, node));
-        edge_points.emplace_back();
-        edge_points.emplace_back();
+        offset = e_.size();
+        e_.emplace_back(std::make_shared<Edge>(parent, node));
+        ep_.emplace_back();
+        ep_.emplace_back();
+        node->set_edge(offset);
     }
 
     // Mark layout as stale
-    layout_stale = true;
+    stale_ = true;
 }
 
 
 void Tree::remove_node(size_t seqnum) {
-    // Check whether node exists
-    if(seqnum >= offset_table.size() || offset_table[seqnum] >= nodes.size()) {
-        throw std::out_of_range("invalid node sequence number");
+    // Validate data
+    NodePtr node;
+    if(seqnum >= index_.size() || !(node = index_[seqnum])) {
+        throw std::out_of_range("unknown sequence number");
     }
 
-    // Determine offset
-    const size_t offset = offset_table[seqnum];
-    NodePtr node = nodes[offset];
+    // Remove node from sequence index
+    index_[seqnum].reset();
 
-    // Remove node from list and offset table
-    for(auto cit = nodes.erase(std::next(nodes.cbegin(), offset)); cit != nodes.cend(); ++cit) {
-        NodePtr node = *cit;
-        --offset_table[node->seqnum];
-        --depth_index[node->depth][node->depth_offset];
-        --category_index[node->category][node->category_offset];
-    }
-    offset_table[seqnum] = std::numeric_limits<size_t>::max();
+    // Attempt to orphan node (will throw exception if impossible)
+    node->set_parent(nullptr);
 
-    // Remove node from depth index, category index, and node coordinates
-    auto& dindex = depth_index[node->depth];
-    for(auto cit = dindex.erase(std::next(dindex.begin(), node->depth_offset)); cit != dindex.cend(); ++cit) {
-        --nodes[*cit]->depth_offset;
+    // Remove root if necessary
+    if(root_ == node) {
+        root_.reset();
     }
 
-    auto& cindex = category_index[node->category];
-    for(auto cit = cindex.erase(std::next(cindex.begin(), node->category_offset)); cit != cindex.cend(); ++cit) {
-        --nodes[*cit]->category_offset;
-    }
+    // Remove coordinate pair and edge
+    size_t category = node->category();
+    size_t coord_offs = node->category_offset();
+    size_t edge_offs = node->edge();
 
-    node_points[node->category].pop_back();
-
-    // Remove all edges attached to the node
-    for(auto cit = edges.cbegin(); cit != edges.cend();) {
-        if((*cit)->child == node) {
-            cit = edges.erase(cit);
-        }
-        else if((*cit)->parent == node) {
-            throw std::logic_error("cannot erase entire subtree");
-        }
-        else {
-            ++cit;
+    np_[category].pop_back();
+    if(coord_offs == np_[category].size()) {
+        size_t offs;
+        for(NodePtr n : index_) {
+            if(n && n->category() == category && (offs = n->category_offset()) > coord_offs) {
+                n->set_category(category, offs - 1);
+            }
         }
     }
-    edge_points.resize(edges.size());
+
+    if(edge_offs < e_.size()) {
+        ep_.pop_back();
+        auto it = e_.erase(std::next(e_.begin(), edge_offs));
+        while(it != e_.end()) {
+            (*(it++))->child()->set_edge(edge_offs++);
+        }
+    }
 
     // Mark layout as stale
-    layout_stale = true;
+    stale_ = true;
 }
 
 
 void Tree::set_category(size_t seqnum, size_t category) {
     // Validate category code
-    if(category >= category_index.size()) {
+    NodePtr node;
+    if(category >= np_.size()) {
         throw std::out_of_range("invalid node category code");
     }
+    if(seqnum >= index_.size() || !(node = index_[seqnum])) {
+        throw std::out_of_range("unknown sequence number");
+    }
 
-    // Find node structure
-    size_t offset = offset_table.at(seqnum);
-    NodePtr node = nodes.at(offset);
-    if(category == node->category) {
+    // Stop if category is actually unchanged
+    size_t old_cat = node->category();
+    if(category == old_cat) {
         return;
     }
 
     // Remove node from category index
-    auto& old_index = category_index[node->category];
-    for(auto cit = old_index.erase(std::next(old_index.cbegin(), node->category_offset)); cit != old_index.cend(); ++cit) {
-        --nodes[*cit]->category_offset;
+    size_t offset = node->category_offset();
+    size_t n_offs;
+    np_[old_cat].pop_back();
+    for(NodePtr n : index_) {
+        if(n && n->category() == old_cat && (n_offs = n->category_offset()) > offset) {
+            n->set_category(old_cat, n_offs - 1);
+        }
     }
-    node_points[node->category].pop_back();
 
     // Insert node into new location in category index
-    auto& new_index = category_index[category];
-    node->category = category;
-    node->category_offset = new_index.size();
-    new_index.push_back(offset);
-    node_points[category].emplace_back();
+    offset = np_[category].size();
+    np_[category].emplace_back();
+    node->set_category(category, offset);
+
+    // Mark layout as stale
+    stale_ = true;
 }
 
 
 void Tree::update_layout() {
-    // Short-circuit if there are no levels
-    if(depth_index.empty() || !layout_stale) {
+    // Short-circuit if there are no nodes or the layout is up to date
+    if(!root_ || !stale_) {
         return;
     }
 
-    // Reset subtree widths on all nodes
-    for(NodePtr node : nodes) {
-        node->child_count = 0;
-        node->subtree_width = 0.0;
-        node->allocated_width = 0.0;
-    }
+    // Calculate node and subtree separation
+    const SkScalar actual_sibling_sep = SkScalar(2 * tree_node_radius + tree_sibling_sep);
+    const SkScalar actual_subtree_sep = SkScalar(2 * tree_node_radius + tree_subtree_sep);
+    const SkScalar actual_level_sep = SkScalar(2 * tree_node_radius + tree_level_sep);
 
-    // Propagate widths upwards
-    for(auto lit = depth_index.crbegin(); lit != std::prev(depth_index.crend()); ++lit) {
-        for(size_t offset : *lit) {
-            NodePtr node = nodes[offset];
-            if(node->child_count) {
-                node->subtree_width += (node->child_count - 1) * tree_subtree_sep;
+    // Traverse tree
+    NodePtr node = root_;
+    NodePtr other;
+    while(node) {
+        // Dive into leftmost leaf
+        while((other = node->child_left())) {
+            node = other;
+        }
+
+        // Set preliminary coordinate and shift
+        node->xpre_ = 0.0;
+        node->xshft_ = (other = node->sibling_left()) ? other->xpre_ + other->xshft_ + actual_sibling_sep : 0.0;
+
+        // Attempt to shift into right sibling
+        if((other = node->sibling_right())) {
+            node = other;
+        }
+        // Start ascending into parents
+        else {
+            while((node = node->parent())) {
+                // Calculate preliminary position of node based on children
+                NodePtr left = node->child_left();
+                NodePtr right = node->child_right();
+                node->xpre_ = (left->xpre_ + left->xshft_ + right->xpre_ + right->xshft_) / 2;
+
+                // Determine shift based on sibling contours
+                right = node->sibling_left();
+                if(!right) {
+                    node->xshft_ = 0.0;
+                }
+                else {
+                    node->xshft_ = right->xpre_ + right->xshft_ + actual_sibling_sep;
+
+                    // Trace contours
+                    double acc_left = node->xshft_;
+                    double acc_right = 0.0;
+                    while(right && left) {
+                        // Trace right contour of left subtree until depth is reached
+                        while(right && right->depth() < left->depth()) {
+                            if((other = right->child_right())) {
+                                acc_right += right->xshft_;
+                                right = std::move(other);
+                            }
+                            else if((other = right->sibling_left())) {
+                                right = std::move(other);
+                            }
+                            else {
+                                do {
+                                    right = right->parent();
+                                    acc_right -= right->xshft_;
+                                } while(right && right->depth() >= node->depth() && !(other = right->sibling_left()));
+                                
+                                if(right && right->depth() < node->depth()) {
+                                    right.reset();
+                                }
+                                else {
+                                    right = std::move(other);
+                                }
+                            }
+                        }
+
+                        if(!right) {
+                            break;
+                        }
+
+                        // Adjust node shift based on contour proximity
+                        double adj = acc_right + right->xshft_ + right->xpre_ + actual_subtree_sep - (acc_left + left->xshft_ - left->xpre_);
+                        if(adj > 0.0) {
+                            node->xshft_ += adj;
+                            acc_left += adj;
+                        }
+
+                        // Trace left contour of right subtree until depth is increased by one
+                        while(left && left->depth() <= right->depth()) {
+                            if((other = left->child_left())) {
+                                acc_left += left->xshft_;
+                                left = std::move(other);
+                            }
+                            else if((other = left->sibling_right())) {
+                                left = std::move(other);
+                            }
+                            else {
+                                do {
+                                    left = left->parent();
+                                    acc_left -= left->xshft_;
+                                } while(left && left->depth() > node->depth() && !(other = left->sibling_right()));
+
+                                if(left && left->depth() <= node->depth()) {
+                                    left.reset();
+                                    break;
+                                }
+                                else {
+                                    left = std::move(other);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Attempt to move into right sibling
+                if((other = node->sibling_right())) {
+                    node = other;
+                    break;
+                }
             }
-            node->subtree_width = std::max(2 * tree_node_radius, node->subtree_width);
-
-            ++node->parent->child_count;
-            node->parent->subtree_width += node->subtree_width;
         }
     }
 
-    // Compute widths on the root level
-    double root_width = 0.0;
-    for(size_t offset : depth_index.front()) {
-        NodePtr node = nodes[offset];
-        if(node->child_count) {
-            node->subtree_width += (node->child_count - 1) * tree_subtree_sep;
+    // Accumulate node shift and calculate final positions
+    bbox_.setEmpty();
+    node = root_;
+    while(node) {
+        node->xacc_ = node->xshft_;
+        if((other = node->parent())) {
+            node->xacc_ += other->xacc_;
         }
-        node->subtree_width = std::max(2 * tree_node_radius, node->subtree_width);
-        root_width += node->subtree_width;
-    }
-    if(!depth_index.front().empty()) {
-        root_width += (depth_index.front().size() - 1) * tree_subtree_sep;
-    }
 
-    // Reset bounding box
-    bounding_box.fTop = std::numeric_limits<SkScalar>::infinity();
-    bounding_box.fBottom = -std::numeric_limits<SkScalar>::infinity();
-    bounding_box.fRight = -std::numeric_limits<SkScalar>::infinity();
-    bounding_box.fLeft = std::numeric_limits<SkScalar>::infinity();
+        SkPoint& coord = np_[node->category()][node->category_offset()];
+        coord.fX = node->xacc_ + node->xpre_;
+        coord.fY = node->depth() * actual_level_sep;
+        bbox_.fRight = std::max(bbox_.fRight, coord.fX);
+        bbox_.fBottom = std::max(bbox_.fBottom, coord.fY);
 
-    // Compute positions on the root level
-    double x = -0.5 * root_width;
-    for(size_t offset : depth_index.front()) {
-        NodePtr node = nodes[offset];
-        x += 0.5 * node->subtree_width;
-        node_points[node->category][node->category_offset] = { (float)x, 0.0 };
-        bounding_box.join(
-            float(x - tree_node_radius),
-            float(-tree_node_radius),
-            float(x + tree_node_radius),
-            float(tree_node_radius)
-        );
-        x += 0.5 * node->subtree_width + tree_subtree_sep;
-    }
+        size_t edge = node->edge();
+        if(edge < e_.size()) {
+            NodePtr parent = node->parent();
+            ep_[2 * edge] = np_[parent->category()][parent->category_offset()];
+            ep_[2 * edge + 1] = np_[node->category()][node->category_offset()];
+        }
 
-    // Propagate positions downwards
-    for(size_t level = 1; level < depth_index.size(); ++level) {
-        const double y = (2 * tree_node_radius + tree_level_sep) * level;
-        for(size_t offset : depth_index[level]) {
-            NodePtr node = nodes[offset];
-            NodePtr parent = node->parent;
+        if((other = node->child_left())) {
+            node = std::move(other);
+        }
+        else if((other = node->sibling_right())) {
+            node = std::move(other);
+        }
+        else {
+            do {
+                node = node->parent();
+            } while(node && !(other = node->sibling_right()));
 
-            double x = node_points[parent->category][parent->category_offset].fX - 0.5 * parent->subtree_width + parent->allocated_width + 0.5 * node->subtree_width;
-            node_points[node->category][node->category_offset] = { (float)x, (float)y };
-            bounding_box.join(
-                float(x - tree_node_radius),
-                float(y - tree_node_radius),
-                float(x + tree_node_radius),
-                float(y + tree_node_radius)
-            );
-            parent->allocated_width += node->subtree_width + tree_subtree_sep;
+            if(node) {
+                node = std::move(other);
+            }
+            else {
+                break;
+            }
         }
     }
+    bbox_.inset(-SkScalar(tree_node_radius), -SkScalar(tree_node_radius));
 
-    // Copy node positions to edge coordinates
-    auto coord_it = edge_points.begin();
-    for(EdgePtr edge : edges) {
-        *coord_it++ = node_points[edge->parent->category][edge->parent->category_offset];
-        *coord_it++ = node_points[edge->child->category][edge->child->category_offset];
-    }
-
-    // Mark layout as fresh
-    layout_stale = false;
+    // Mark layout as not stale
+    stale_ = false;
 }
 
 
@@ -275,11 +396,11 @@ void Tree::draw(SkCanvas* canvas) const {
     // Draw edges
     SkPaint edge_paint;
     edge_paint.setColor(edge_style_table.front().edge_color);
-    canvas->drawPoints(SkCanvas::kLines_PointMode, edge_points.size(), edge_points.data(), edge_paint);
+    canvas->drawPoints(SkCanvas::kLines_PointMode, ep_.size(), ep_.data(), edge_paint);
 
     // Draw nodes
-    for(size_t category = 0; category < node_points.size(); ++category) {
-        const auto& points = node_points[category];
+    for(size_t category = 0; category < np_.size(); ++category) {
+        const auto& points = np_[category];
         const auto& style = node_style_table[category];
 
         if(!points.empty()) {

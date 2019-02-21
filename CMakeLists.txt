@@ -4,7 +4,7 @@ project(vbc2vid CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 set(CMAKE_BUILD_TYPE Debug)
 
-find_package(Boost 1.44.0 REQUIRED COMPONENTS iostreams)
+find_package(Boost 1.46.0 REQUIRED COMPONENTS filesystem iostreams)
 find_package(PkgConfig REQUIRED)
 
 # Find GStreamer for video output
@@ -24,6 +24,7 @@ set(SOURCES
     test.cpp
     src/Event.cpp
     src/Tree.cpp
+    src/VbcReader.cpp
     src/VideoOutput.cpp
     ${VBC_GENERATED_FILES}
 )
@@ -39,5 +40,7 @@ target_link_libraries(test
     ${GST_LIBRARIES}
     SKIA::Static
     Boost::boost
+    Boost::filesystem
+    Boost::iostreams
 )
 add_dependencies(test generate_vbc_code)

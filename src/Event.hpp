@@ -9,18 +9,12 @@
 class Event;
 class VbcReader;
 typedef std::shared_ptr<Event> EventPtr;
-typedef std::weak_ptr<Event> WeakEventPtr;
 
 
 class Event {
 private:
-    friend class VbcReader;
-
     const size_t seq_num;
     const double time;
-
-    EventPtr next;
-    WeakEventPtr prev;
 
 public:
     Event(size_t seq, double time) : seq_num(seq), time(time) {}
@@ -29,15 +23,9 @@ public:
 
     size_t get_seq_num() const { return seq_num; }
     double get_time() const { return time; }
-    EventPtr get_next() const { return next; }
-    EventPtr get_prev() const { return prev.lock(); }
 
     virtual void apply(TreePtr tree) = 0;
     virtual void revert(TreePtr tree) = 0;
-
-private:
-    void set_next(EventPtr event) { next = event; }
-    void set_prev(EventPtr event) { prev = event; }
 };
 
 
