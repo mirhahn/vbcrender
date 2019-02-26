@@ -19,8 +19,10 @@
 #include "Styles.hpp"
 #include "VideoOutput.hpp"
 
+#include <iomanip>
 #include <iostream>
 #include <thread>
+#include <sstream>
 
 #include <glib.h>
 #include <gst/gst.h>
@@ -33,10 +35,10 @@ struct VideoOutput::Data {
     Data()
         : img_info(),
           surface(nullptr),
-          input_caps(NULL),
           pool(NULL),
           pipeline(NULL),
-          appsrc(NULL),
+          vidsrc(NULL),
+          txtsrc(NULL),
           stream_time(0),
           num_frames(0),
           r_thread()
@@ -46,7 +48,7 @@ struct VideoOutput::Data {
     ~Data() {
         if(r_thread.joinable()) {
             GstFlowReturn ret;
-            g_signal_emit_by_name(appsrc, "end-of-stream", &ret);
+            g_signal_emit_by_name(vidsrc, "end-of-stream", &ret);
             if(ret == GST_FLOW_OK) {
                 r_thread.join();
             }
@@ -57,18 +59,15 @@ struct VideoOutput::Data {
         if(pool) {
             g_object_unref(G_OBJECT(pool));
         }
-        if(input_caps) {
-            gst_caps_unref(input_caps);
-        }
     }
 
     SkImageInfo         img_info;   ///< Image memory layout information.
     sk_sp<SkSurface>    surface;    ///< SKIA rendering surface.
 
-    GstCaps*        input_caps;     ///< Input video data type.
     GstBufferPool*  pool;           ///< Buffer pool for video frames.
     GstElement*     pipeline;       ///< GStreamer encoding pipeline.
-    GstElement*     appsrc;         ///< Source element for rendered frames.
+    GstElement*     vidsrc;         ///< Source element for rendered frames.
+    GstElement*     txtsrc;         ///< Source element for overlay text.
 
     guint64         frame_duration; ///< Duration of single frame in nanoseconds.
     guint64         stream_time;    ///< Current stream timestamp.
@@ -279,24 +278,20 @@ VideoOutput::VideoOutput()
     : d_(),
       fps_n(30),
       fps_d(1),
+      cond_n(1),
+      cond_d(1),
       width(1920),
       height(1080),
-      file("out.avi")
-{}
-
-
-VideoOutput::VideoOutput(VideoOutput&& vidout)
-    : d_(std::move(vidout.d_)),
-      fps_n(vidout.fps_n),
-      fps_d(vidout.fps_d),
-      width(vidout.width),
-      height(vidout.height),
-      file(vidout.file)
+      file("vbcrender.avi"),
+      clock(false),
+      bounds(false),
+      text_halign(0),
+      text_valign(2)
 {}
 
 
 double VideoOutput::get_frame_time() const {
-    return double(fps_d) / double(fps_n);
+    return double(fps_d * cond_d) / double(fps_n * cond_n);
 }
 
 
@@ -320,6 +315,16 @@ void VideoOutput::set_frame_rate(size_t num, size_t den) {
 }
 
 
+void VideoOutput::set_time_condensation(size_t num, size_t den) {
+    if(d_) {
+        throw std::logic_error("attempt to set time condensation factor after rendering started");
+    }
+    
+    cond_n = num;
+    cond_d = den;
+}
+
+
 void VideoOutput::set_dim(size_t width, size_t height) {
     if(d_) {
         throw std::logic_error("attempt to set video dimension after rendering started");
@@ -339,6 +344,34 @@ void VideoOutput::set_file_path(const std::string& file) {
 }
 
 
+void VideoOutput::set_clock(bool on) {
+    if(d_) {
+        throw std::logic_error("attempt to switch clock state after rendering started");
+    }
+
+    clock = on;
+}
+
+
+void VideoOutput::set_bounds(bool on) {
+    if(d_) {
+        throw std::logic_error("attempt to switch bounds state after rendering started");
+    }
+
+    bounds = on;
+}
+
+
+void VideoOutput::set_text_align(size_t halign, size_t valign) {
+    if(d_) {
+        throw std::logic_error("attempt to switch text alignment after rendering started");
+    }
+
+    text_halign = halign;
+    text_valign = valign;
+}
+
+
 void VideoOutput::start() {
     // Set up rendering pipeline if not yet created
     if(!d_) {
@@ -348,52 +381,90 @@ void VideoOutput::start() {
         d_->img_info = SkImageInfo::Make(width, height, kRGB_888x_SkColorType, kOpaque_SkAlphaType);
         d_->surface = SkSurface::MakeRaster(d_->img_info);
 
-        // Try to find caps from filename
+        // Try to deduce output caps based on file extension
         GstCaps* output_caps = get_caps_for_file(file);
+        if(!output_caps) {
+            throw std::runtime_error("failed to guess video file format");
+        }
 
-        // Create caps object for generated frames
-        d_->input_caps = gst_caps_new_simple("video/x-raw",
+        // Define remaining caps
+        GstCaps* input_video_caps = gst_caps_new_simple("video/x-raw",
             "format", G_TYPE_STRING, "RGBx",
             "width", G_TYPE_INT, (int)width,
             "height", G_TYPE_INT, (int)height,
             "framerate", GST_TYPE_FRACTION, (int)fps_n, (int)fps_d,
             NULL
         );
+        GstCaps* input_text_caps = gst_caps_new_simple("text/x-raw",
+            "format", G_TYPE_STRING, "utf8",
+            NULL
+        );
+
+        // Dynamically generate an encoder bin
+        GstElement* encodebin = create_bin_for_caps(output_caps);
+        gst_caps_unref(output_caps);
+        if(!encodebin) {
+            throw std::runtime_error("failed to construct encoder for video file");
+        }
+
+        // Create remaining elements
+        GstElement *filesink, *converter, *overlay;
+        filesink = gst_element_factory_make("filesink", "file-output");
+        converter = gst_element_factory_make("videoconvert", "video-convert");
+        d_->vidsrc = gst_element_factory_make("appsrc", "video-source");
+        d_->pipeline = gst_pipeline_new("render-pipeline");
+
+        gst_bin_add_many(GST_BIN(d_->pipeline), d_->vidsrc, converter, encodebin, filesink, NULL);
+        
+        // Configure first elements and link where possible
+        g_object_set(G_OBJECT(d_->vidsrc),
+            "block" , TRUE              ,
+            "caps"  , input_video_caps  ,
+            "format", GST_FORMAT_TIME   ,
+            NULL
+        );
+        g_object_set(G_OBJECT(filesink),
+            "location", file.c_str(),
+            NULL
+        );
+        gst_element_link_many(converter, encodebin, filesink, NULL);
+
+        if(clock || bounds) {
+            d_->txtsrc = gst_element_factory_make("appsrc", "overlay-text-source");
+            overlay = gst_element_factory_make("textoverlay", "text-overlay");
+            gst_bin_add_many(GST_BIN(d_->pipeline), d_->txtsrc, overlay, NULL);
+
+            // Configure additional elements
+            g_object_set(G_OBJECT(d_->txtsrc),
+                "block" , TRUE              ,
+                "caps"  , input_text_caps   ,
+                "format", GST_FORMAT_TIME   ,
+                NULL
+            );
+            g_object_set(G_OBJECT(overlay)  ,
+                "halignment", (int)text_halign,
+                "valignment", (int)text_valign,
+                "line-alignment", (int)text_halign,
+                NULL
+            );
+            gst_caps_unref(input_text_caps);
+            gst_element_link_many(d_->vidsrc, overlay, converter, NULL);
+            gst_element_link(d_->txtsrc, overlay);
+        }
+        else {
+            gst_element_link(d_->vidsrc, converter);
+        }
 
         // Create buffer pool
         d_->pool = gst_buffer_pool_new();
         GstStructure* pool_conf = gst_buffer_pool_get_config(d_->pool);
-        gst_buffer_pool_config_set_params(pool_conf, d_->input_caps, width * height * sizeof(uint32_t), 10, 100);
+        gst_buffer_pool_config_set_params(pool_conf, input_video_caps, width * height * sizeof(uint32_t), 10, 100);
         gst_buffer_pool_set_config(d_->pool, pool_conf);
         gst_buffer_pool_set_active(d_->pool, true);
-
-        // Create GStreamer pipeline
-        d_->pipeline = gst_pipeline_new("encoding_pipeline");
-        GstElement* filesink = gst_element_factory_make("filesink", "file_sink");
-        GstElement* encodebin = create_bin_for_caps(output_caps);
-        GstElement* converter = gst_element_factory_make("videoconvert", "video_converter");
-        GstElement* clock = gst_element_factory_make("timeoverlay", "time_overlay");
-        d_->appsrc = gst_element_factory_make("appsrc", "video_source");
-
-        g_object_set(d_->appsrc,
-            "block", true,
-            "caps", d_->input_caps,
-            "format", GST_FORMAT_TIME,
-            NULL
-        );
-        g_object_set(filesink,
-            "location", file.c_str(),
-            NULL
-        );
-
-        gst_bin_add_many(GST_BIN(d_->pipeline), d_->appsrc, clock, converter, encodebin, filesink, NULL);
-        gst_element_link_many(d_->appsrc, clock, converter, encodebin, filesink, NULL);
+        gst_caps_unref(input_video_caps);
 
         // Calculate frame duration
         d_->frame_duration = gst_util_uint64_scale(1, fps_d * GST_SECOND, fps_n);
-
-        // Free output caps
-        gst_caps_unref(output_caps);
     }
 
     // Wait for current render thread to die.
@@ -482,12 +553,73 @@ void VideoOutput::push_frame(TreePtr tree) {
     // Attach timestamp information to the buffer
     GST_BUFFER_DURATION(buffer) = d_->frame_duration;
     GST_BUFFER_PTS(buffer) = d_->stream_time;
+
+    // Create a text buffer for the overlay
+    if(d_->txtsrc) {
+        std::ostringstream str;
+        bool empty = true;
+
+        if(clock) {
+            guint64 timestamp;
+            if(cond_n != cond_d) {
+                timestamp = gst_util_uint64_scale(GST_BUFFER_PTS(buffer), cond_d, cond_n);
+            }
+            else {
+                timestamp = GST_BUFFER_PTS(buffer);
+            }
+
+            const auto fill = str.fill('0');
+            str << std::setw(2) << (timestamp / (3600 * GST_SECOND)) << ':'
+                << std::setw(2) << ((timestamp % (3600 * GST_SECOND)) / (60 * GST_SECOND)) << ':'
+                << std::setw(2) << ((timestamp % (60 * GST_SECOND)) / GST_SECOND) << '.'
+                << std::setw(3) << ((timestamp % GST_SECOND) / (GST_SECOND / 1000));
+            str.fill(fill);
+
+            empty = false;
+        }
+
+        if(bounds) {
+            double ub = tree->upper_bound();
+            double lb = tree->lower_bound();
+
+            if(std::isfinite(ub)) {
+                if(!empty) {
+                    str << '\n';
+                }
+                str << "UB = " << ub;
+                empty = false;
+            }
+
+            if(std::isfinite(lb)) {
+                if(!empty) {
+                    str << '\n';
+                }
+                str << "LB = " << lb;
+            }
+        }
+
+        // Create a buffer with the text data
+        std::string msg = str.str();
+        gchar* data = g_strndup(msg.c_str(), msg.size());
+        GstBuffer* txtbuf = gst_buffer_new_wrapped(data, msg.size());
+
+        // Set buffer metadata
+        GST_BUFFER_DURATION(txtbuf) = d_->frame_duration;
+        GST_BUFFER_PTS(txtbuf) = d_->stream_time;
+
+        // Push buffer into the pipeline
+        GstFlowReturn ret;
+        g_signal_emit_by_name(d_->txtsrc, "push-buffer", txtbuf, &ret);
+        gst_buffer_unref(txtbuf);
+    }
+
+    // Advance timestamps
     d_->stream_time += d_->frame_duration;
     ++d_->num_frames;
 
     // Push buffer into the pipeline
     GstFlowReturn ret;
-    g_signal_emit_by_name(d_->appsrc, "push-buffer", buffer, &ret);
+    g_signal_emit_by_name(d_->vidsrc, "push-buffer", buffer, &ret);
     gst_buffer_unref(buffer);
 
     if(ret != GST_FLOW_OK) {
@@ -502,7 +634,7 @@ void VideoOutput::stop(bool error) {
     }
 
     GstFlowReturn ret;
-    g_signal_emit_by_name(d_->appsrc, "end-of-stream", &ret);
+    g_signal_emit_by_name(d_->vidsrc, "end-of-stream", &ret);
     if(ret != GST_FLOW_OK) {
         throw std::runtime_error("failed to send end-of-stream signal");
     }

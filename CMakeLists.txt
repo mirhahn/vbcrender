@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.2)
 project(vbc2vid CXX)
 
-find_package(Boost 1.46.0 REQUIRED COMPONENTS filesystem iostreams)
+find_package(Boost 1.46.0 REQUIRED COMPONENTS filesystem iostreams program_options)
 find_package(PkgConfig REQUIRED)
 
 # Find GStreamer for video output
@@ -18,7 +18,7 @@ add_subdirectory(${DEPENDENCY_DIR})
 set_source_files_properties(${VBC_GENERATED_FILES} PROPERTIES GENERATED TRUE)
 
 set(SOURCES
-    test.cpp
+    src/main.cpp
     src/Event.cpp
     src/Tree.cpp
     src/VbcReader.cpp
@@ -26,18 +26,19 @@ set(SOURCES
     ${VBC_GENERATED_FILES}
 )
 
-add_executable(test ${SOURCES})
-target_include_directories(test
+add_executable(vbcrender ${SOURCES})
+target_include_directories(vbcrender
     PRIVATE
     ${GST_INCLUDE_DIRS}
     src
 )
-target_link_libraries(test
+target_link_libraries(vbcrender
     PRIVATE
     ${GST_LIBRARIES}
     SKIA::Static
     Boost::boost
     Boost::filesystem
     Boost::iostreams
+    Boost::program_options
 )
-add_dependencies(test generate_vbc_code)
+add_dependencies(vbcrender generate_vbc_code)
