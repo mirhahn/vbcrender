@@ -1,10 +1,30 @@
+/*
+ * vbcrender - Command line tool to render videos from VBC files.
+ * Copyright (C) 2019 Mirko Hahn
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include "Styles.hpp"
 #include "VideoOutput.hpp"
 
+#include <iostream>
 #include <thread>
 
 #include <glib.h>
 #include <gst/gst.h>
+#include <GrContext.h>
 #include <SkImageInfo.h>
 #include <SkSurface.h>
 
@@ -74,7 +94,7 @@ static GstCaps* get_caps_for_file(const std::string& filename) {
     size_t last_period = filename.rfind('.');
     gchar* file_ext;
     if(last_period >= filename.size()) {
-        file_ext = g_utf8_casefold("mp4", 3);
+        file_ext = g_utf8_casefold("avi", 3);
     }
     else {
         file_ext = g_utf8_casefold(&filename[last_period + 1], filename.size() - last_period - 1);
@@ -82,30 +102,32 @@ static GstCaps* get_caps_for_file(const std::string& filename) {
 
     // Find typefinder of highest rank associated with the extension
     GstTypeFindFactory* best_type = NULL;
-    guint best_rank = GST_RANK_NONE;
-
     GList* all_types = gst_type_find_factory_get_list();
-    for(GList* l = all_types; l != NULL; l = l->next) {
+    for(GList* l = all_types; l && !best_type; l = l->next) {
         GstTypeFindFactory *type = GST_TYPE_FIND_FACTORY(l->data);
-        guint rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(type));
-
-        if(!(rank > best_rank || !best_type)) {
-            continue;
-        }
-
         const gchar* const *exts = gst_type_find_factory_get_extensions(type);
-        for(const gchar* const *e = exts; *e != NULL; ++e) {
-            gchar* fold_ext = g_utf8_casefold(*e, -1);
-            if(!strcmp(file_ext, fold_ext)) {
-                best_type = type;
-                best_rank = rank;
+        if(exts) {
+            for(const gchar* const *e = exts; *e != NULL; ++e) {
+                gchar* fold_ext = g_utf8_casefold(*e, -1);
+                if(!strcmp(file_ext, fold_ext)) {
+                    best_type = type;
+                    break;
+                }
+                g_free(fold_ext);
             }
-            g_free(fold_ext);
         }
     }
 
     // Obtain caps for this file type
-    GstCaps* caps = best_type ? gst_type_find_factory_get_caps(best_type) : NULL;
+    GstCaps* caps = best_type ? gst_caps_copy(gst_type_find_factory_get_caps(best_type)) : NULL;
+
+#ifndef NDEBUG
+    if(caps) {
+        gchar* name = gst_caps_to_string(caps);
+        std::cout << "AUTOPLUGGER: detected file caps as '" << name << '\'' << std::endl;
+        g_free(name);
+    }
+#endif
 
     // Free allocated resources
     gst_plugin_feature_list_free(all_types);
@@ -115,13 +137,151 @@ static GstCaps* get_caps_for_file(const std::string& filename) {
 }
 
 
+GstElement* create_bin_for_caps(const GstCaps* file_caps) {
+    // Get a list of all muxer elements that can source the desired type
+    GList* all_muxers = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_MUXER, GST_RANK_MARGINAL);
+    GList* muxers = gst_element_factory_list_filter(all_muxers, file_caps, GST_PAD_SRC, FALSE);
+    gst_plugin_feature_list_free(all_muxers);
+
+    // Sort muxers by rank
+    muxers = g_list_sort(muxers, gst_plugin_feature_rank_compare_func);
+
+    // Obtain a list of all video encoders that can sink the desired type
+    GList* encoders = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_ENCODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO, GST_RANK_MARGINAL);
+
+    // Try all muxers in order of preference
+    GstElementFactory* selected_muxer = NULL;
+    GstElementFactory* selected_encoder = NULL;
+    for(GList* it = muxers; it != NULL; it = it->next) {
+        // Obtain the element factory of the current muxer
+        GstElementFactory* muxer_factory = GST_ELEMENT_FACTORY(it->data);
+
+        // Find static pad templates for the muxer
+        const GList* pad_templates = gst_element_factory_get_static_pad_templates(muxer_factory);
+        const GList* it_pad;
+        for(it_pad = pad_templates; it_pad != NULL; it_pad = it_pad->next) {
+            GstStaticPadTemplate* tmpl = (GstStaticPadTemplate*)it_pad->data;
+
+            // Only consider sink pads
+            if(tmpl->direction != GST_PAD_SINK) {
+                continue;
+            }
+
+            // Filter all encoders that can attach to this pad
+            GstCaps* pad_caps = gst_static_caps_get(&tmpl->static_caps);
+            GList* pad_encoders = gst_element_factory_list_filter(encoders, pad_caps, GST_PAD_SRC, FALSE);
+            gst_caps_unref(pad_caps);
+
+            // Pick the highest ranked encoder
+            guint highest_rank = GST_RANK_NONE;
+            for(GList* it_enc = pad_encoders; it_enc != NULL; it_enc = it_enc->next) {
+                GstElementFactory* enc = GST_ELEMENT_FACTORY(it_enc->data);
+                guint rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(enc));
+                if(rank > highest_rank) {
+                    selected_encoder = enc;
+                    highest_rank = rank;
+                }
+            }
+
+            // Free the pad-specific encoder list
+            gst_plugin_feature_list_free(pad_encoders);
+
+            // Terminate search if an encoder has been found
+            if(selected_encoder) {
+                break;
+            }
+        }
+
+        // Terminate search if a suitable encoder is found
+        if(selected_encoder) {
+            selected_muxer = muxer_factory;
+            break;
+        }
+    }
+
+    // Free the remaining plugin feature lists
+    gst_plugin_feature_list_free(encoders);
+    gst_plugin_feature_list_free(muxers);
+
+    // Return NULL if there is no suitable encoder
+    if(!selected_encoder) {
+        return NULL;
+    }
+
+    // Report selected encoder and muxer
+#ifndef NDEBUG
+    std::cout << "AUTOPLUGGER: selected encoder '" << gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(selected_encoder)) << "'\n"
+        << "AUTOPLUGGER: selected muxer '" << gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(selected_muxer)) << '\'' << std::endl;
+#endif
+
+    // Create encoder and muxer and add them to a bin
+    GstElement* bin = gst_bin_new("encodebin");
+    GstElement* encoder = gst_element_factory_create(selected_encoder, "video-encoder");
+    GstElement* muxer = gst_element_factory_create(selected_muxer, "format-muxer");
+
+    // Fill the bin and link the elements
+    gst_bin_add_many(GST_BIN(bin), encoder, muxer, NULL);
+    gst_element_link(encoder, muxer);
+
+    // Create ghost pads for all sources and sinks
+    GstIteratorResult r;
+    bool done = false;
+    GValue item = G_VALUE_INIT;
+    GstIterator* src_pads = gst_element_iterate_src_pads(muxer);
+    while(!done) {
+        switch(r = gst_iterator_next(src_pads, &item)) {
+        case GST_ITERATOR_RESYNC:
+            gst_iterator_resync(src_pads);
+            break;
+        case GST_ITERATOR_OK:
+            {
+                GstPad* target = GST_PAD(g_value_get_object(&item));
+                GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
+                gst_element_add_pad(bin, ghost);
+            }
+            break;
+        case GST_ITERATOR_DONE:
+        case GST_ITERATOR_ERROR:
+            done = true;
+        }
+    }
+    g_value_unset(&item);
+    gst_iterator_free(src_pads);
+
+    done = false;
+    item = G_VALUE_INIT;
+    GstIterator* sink_pads = gst_element_iterate_sink_pads(encoder);
+    while(!done) {
+        switch(r = gst_iterator_next(sink_pads, &item)) {
+        case GST_ITERATOR_RESYNC:
+            gst_iterator_resync(sink_pads);
+            break;
+        case GST_ITERATOR_OK:
+            {
+                GstPad* target = GST_PAD(g_value_get_object(&item));
+                GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
+                gst_element_add_pad(bin, ghost);
+            }
+            break;
+        case GST_ITERATOR_DONE:
+        case GST_ITERATOR_ERROR:
+            done = true;
+        }
+    }
+    g_value_unset(&item);
+    gst_iterator_free(sink_pads);
+
+    return bin;
+}
+
+
 VideoOutput::VideoOutput()
     : d_(),
       fps_n(30),
       fps_d(1),
       width(1920),
       height(1080),
-      file("out.mp4")
+      file("out.avi")
 {}
 
 
@@ -188,6 +348,9 @@ void VideoOutput::start() {
         d_->img_info = SkImageInfo::Make(width, height, kRGB_888x_SkColorType, kOpaque_SkAlphaType);
         d_->surface = SkSurface::MakeRaster(d_->img_info);
 
+        // Try to find caps from filename
+        GstCaps* output_caps = get_caps_for_file(file);
+
         // Create caps object for generated frames
         d_->input_caps = gst_caps_new_simple("video/x-raw",
             "format", G_TYPE_STRING, "RGBx",
@@ -207,8 +370,7 @@ void VideoOutput::start() {
         // Create GStreamer pipeline
         d_->pipeline = gst_pipeline_new("encoding_pipeline");
         GstElement* filesink = gst_element_factory_make("filesink", "file_sink");
-        GstElement* muxer = gst_element_factory_make("mp4mux", "stream_muxer");
-        GstElement* encoder = gst_element_factory_make("x264enc", "video_encoder");
+        GstElement* encodebin = create_bin_for_caps(output_caps);
         GstElement* converter = gst_element_factory_make("videoconvert", "video_converter");
         GstElement* clock = gst_element_factory_make("timeoverlay", "time_overlay");
         d_->appsrc = gst_element_factory_make("appsrc", "video_source");
@@ -224,11 +386,14 @@ void VideoOutput::start() {
             NULL
         );
 
-        gst_bin_add_many(GST_BIN(d_->pipeline), d_->appsrc, clock, converter, encoder, muxer, filesink, NULL);
-        gst_element_link_many(d_->appsrc, clock, converter, encoder, muxer, filesink, NULL);
+        gst_bin_add_many(GST_BIN(d_->pipeline), d_->appsrc, clock, converter, encodebin, filesink, NULL);
+        gst_element_link_many(d_->appsrc, clock, converter, encodebin, filesink, NULL);
 
         // Calculate frame duration
         d_->frame_duration = gst_util_uint64_scale(1, fps_d * GST_SECOND, fps_n);
+
+        // Free output caps
+        gst_caps_unref(output_caps);
     }
 
     // Wait for current render thread to die.

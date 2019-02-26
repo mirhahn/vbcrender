@@ -12,10 +12,15 @@ set(VBC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vbctool")
 set(ENV{PATH} "${SKIA_BUILD_PATH}")
 
 # Build SKIA
+message(STATUS "Updating Git submodules.")
 execute_process(COMMAND ${GIT_EXECUTABLE} submodule init WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 execute_process(COMMAND ${GIT_EXECUTABLE} submodule update WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+message(STATUS "Preparing SKIA build.")
 execute_process(COMMAND ${PYTHON_EXECUTABLE} tools/git-sync-deps WORKING_DIRECTORY "${SKIA_DIR}")
 execute_process(COMMAND gn gen out/Static "--args=is_official_build=true" WORKING_DIRECTORY "${SKIA_DIR}")
+
+message(STATUS "Building SKIA.")
 execute_process(COMMAND ninja -C out/Static WORKING_DIRECTORY "${SKIA_DIR}")
 execute_process(COMMAND gn desc out/Static //:skia libs WORKING_DIRECTORY "${SKIA_DIR}" OUTPUT_VARIABLE SKIA_EXT_LIBS)
 string(REPLACE "\n" ";" SKIA_EXT_LIBS "${SKIA_EXT_LIBS}")
@@ -33,7 +38,7 @@ set_target_properties(SKIA::Static PROPERTIES IMPORTED_LOCATION "${SKIA_DIR}/out
 add_dependencies(SKIA::Static build_skia_static)
 
 # Add custom target for VBCTool
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/vbctool)
+file(MAKE_DIRECTORY ${VBC_DIR})
 message(STATUS "Downloading VbcTool")
 file(DOWNLOAD
 	https://informatik.uni-koeln.de/fileadmin/projects/vbctool/vbcLinux.tgz

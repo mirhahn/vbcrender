@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.2)
 project(vbc2vid CXX)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
-set(CMAKE_BUILD_TYPE Debug)
-
 find_package(Boost 1.46.0 REQUIRED COMPONENTS filesystem iostreams)
 find_package(PkgConfig REQUIRED)
 

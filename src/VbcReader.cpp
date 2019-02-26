@@ -1,3 +1,21 @@
+/*
+ * vbcrender - Command line tool to render videos from VBC files.
+ * Copyright (C) 2019 Mirko Hahn
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -40,8 +58,9 @@ void VbcReader::IOErrorEvent::apply(TreePtr tree) {}
 void VbcReader::IOErrorEvent::revert(TreePtr tree) {}
 
 
-VbcReader::VbcReader(bool rewindable)
+VbcReader::VbcReader(bool rewindable, bool strip_info)
     : rewind_(rewindable),
+      strip_(strip_info),
       running_(false),
       stopreq_(false)
 {}
@@ -78,16 +97,16 @@ void VbcReader::read_file(std::string filename) {
 
     // Build pipeline based on file extensions
     std::string ext = bfs::extension(filename);
-    in.push(bio::file_source(filename));
     if(ext == ".gz" || ext == ".GZ") {
         in.push(bio::gzip_decompressor());
     }
     else if(ext == ".bz2" || ext == ".BZ2") {
         in.push(bio::bzip2_decompressor());
     }
+    in.push(bio::file_source(filename));
 
     // Test if file was successfully opened
-    bio::file_source* file = in.component<bio::file_source>(0);
+    bio::file_source* file = in.component<bio::file_source>(in.size() - 1);
     if(!file->is_open()) {
         head = push_event(head, std::make_shared<IOErrorEvent>("Could not open VBC file"));
     }
@@ -190,9 +209,13 @@ void VbcReader::read_file(std::string filename) {
                         }
                     }
 
+
                     if(!in) {
                         head = push_event(head, std::make_shared<IOErrorEvent>("error reading information modification parameters (opcode A or I)"));
                         error = true;
+                    }
+                    else if(strip_) {
+                        break;
                     }
                     else if(opcode == 'A') {
                         head = push_event(head, std::make_shared<AppendInfoEvent>(event_seq++, timestamp, node_seq, main_info.str(), general_info.str()));

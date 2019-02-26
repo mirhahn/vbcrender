@@ -1,5 +1,23 @@
 #!/usr/bin/env python
 
+#
+# vbcrender - Command line tool to render videos from VBC files.
+# Copyright (C) 2019 Mirko Hahn
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
 import os
 import os.path
 from collections import namedtuple
@@ -130,10 +148,10 @@ print('''// WARNING: THIS CODE IS AUTOMATICALLY GENERATED. DO NOT ALTER IT!
 #include "Styles.hpp"
 
 
-double tree_level_sep = {};
-double tree_subtree_sep = {};
-double tree_sibling_sep = {};
-double tree_node_radius = {};
+SkScalar tree_level_sep = SkScalar({});
+SkScalar tree_subtree_sep = SkScalar({});
+SkScalar tree_sibling_sep = SkScalar({});
+SkScalar tree_node_radius = SkScalar({});
 SkColor background_color = SkColorSetRGB({}, {}, {});
 
 std::vector<NodeStyle> node_style_table {{'''.format(
