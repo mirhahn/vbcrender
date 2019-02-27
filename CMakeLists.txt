@@ -12,7 +12,7 @@ pkg_check_modules(GST REQUIRED
 pkg_check_modules(CAIRO REQUIRED
     cairo
 )
-link_directories(${GST_LIBRARY_DIRS} ${CAIRO_LIBRARY_DIRS})
+link_directories(${Boost_LIBRARY_DIRS} ${CAIRO_LIBRARY_DIRS} ${GST_LIBRARY_DIRS})
 
 # Set subdirectory paths
 set(SCRIPT_DIR ${CMAKE_SOURCE_DIR}/tools/gen_scripts)
@@ -33,18 +33,16 @@ set(SOURCES
 add_executable(vbcrender ${SOURCES})
 target_include_directories(vbcrender
     PRIVATE
-    ${GST_INCLUDE_DIRS}
+    ${Boost_INCLUDE_DIRS}
     ${CAIRO_INCLUDE_DIRS}
+    ${GST_INCLUDE_DIRS}
     src
 )
 target_link_libraries(vbcrender
     PRIVATE
+    ${Boost_LIBRARIES}
     ${GST_LIBRARIES}
     ${CAIRO_LIBRARIES}
-    Boost::boost
-    Boost::filesystem
-    Boost::iostreams
-    Boost::program_options
     Threads::Threads
 )
 add_dependencies(vbcrender generate_vbc_code)
