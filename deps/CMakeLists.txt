@@ -1,15 +1,17 @@
 # Find Python to execute code generation script
 find_package(PythonInterp REQUIRED)
 
+# Find Wget for downloads
+find_package(Wget REQUIRED)
+
 # Determine VBC directory
 set(VBC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vbctool")
 
 # Add custom target for VBCTool
-file(MAKE_DIRECTORY ${VBC_DIR})
-file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/download-vbc.cmake "file(DOWNLOAD https://informatik.uni-koeln.de/fileadmin/projects/vbctool/vbcLinux.tgz \"${VBC_DIR}/vbcLinux.tgz\")")
-
 add_custom_command(OUTPUT ${VBC_DIR}/vbcLinux.tgz
-	COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_BINARY_DIR}/download-vbc.cmake
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${VBC_DIR}"
+        COMMAND ${WGET_EXECUTABLE} --no-check-certificate -O "vbctool/vbcLinux.tgz" https://informatik.uni-koeln.de/fileadmin/projects/vbctool/vbcLinux.tgz
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 	COMMENT "Downloading VBCTOOL package"
 )
 add_custom_command(OUTPUT ${VBC_DIR}/vbctool/GRAPHResource/GRAPHrgb.txt ${VBC_DIR}/vbctool/GRAPHResource/GRAPHStandardResource.rsc

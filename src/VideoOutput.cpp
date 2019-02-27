@@ -392,7 +392,7 @@ void VideoOutput::set_text_align(size_t halign, size_t valign) {
 void VideoOutput::start() {
     // Set up rendering pipeline if not yet created
     if(!d_) {
-        d_ = std::make_unique<Data>();
+        d_ = std::make_shared<Data>();
 
         // Create rendering surface and drawing context for Cairo
         d_->surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, (int)width, (int)height);
@@ -499,7 +499,7 @@ void VideoOutput::start() {
 
         // Install watch on GStreamer bus
         GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(data->pipeline));
-        gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
+        guint watch_id = gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
 
         // Install termination callbacks
         guint error_handler = g_signal_connect(bus, "message::error", (GCallback)on_stream_error, data);
@@ -524,7 +524,7 @@ void VideoOutput::start() {
         g_signal_handler_disconnect(bus, eos_handler);
 
         // Remove bus watch
-        gst_bus_remove_watch(bus);
+        g_source_remove(watch_id);
 
         // Destroy main context and main loop
         g_main_loop_unref(data->loop);

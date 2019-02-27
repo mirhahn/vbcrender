@@ -19,6 +19,7 @@
 #ifndef __VBC_TREE_HPP
 #define __VBC_TREE_HPP
 
+#include <cstddef>
 #include <list>
 #include <memory>
 #include <string>
