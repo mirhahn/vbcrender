@@ -1,5 +1,5 @@
-# Find Git and initialize submodules
-find_package(Git REQUIRED)
+# Find Python to execute code generation script
+find_package(PythonInterp REQUIRED)
 
 # Determine VBC directory
 set(VBC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vbctool")
