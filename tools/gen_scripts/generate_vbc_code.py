@@ -145,25 +145,26 @@ with open(resource_path, 'r') as f:
 # Write header
 print('''// WARNING: THIS CODE IS AUTOMATICALLY GENERATED. DO NOT ALTER IT!
 
+#include "Types.hpp"
 #include "Styles.hpp"
 
 
-SkScalar tree_level_sep = SkScalar({});
-SkScalar tree_subtree_sep = SkScalar({});
-SkScalar tree_sibling_sep = SkScalar({});
-SkScalar tree_node_radius = SkScalar({});
-SkColor background_color = SkColorSetRGB({}, {}, {});
+Scalar tree_level_sep = Scalar({});
+Scalar tree_subtree_sep = Scalar({});
+Scalar tree_sibling_sep = Scalar({});
+Scalar tree_node_radius = Scalar({});
+Color background_color = Color {{ {}, {}, {} }};
 
 std::vector<NodeStyle> node_style_table {{'''.format(
     tree_level_sep, tree_subtree_sep, tree_sibling_sep, tree_node_radius,
-    background_color[0], background_color[1], background_color[2]
+    background_color[0] / 255.0, background_color[1] / 255.0, background_color[2] / 255.0
 ))
 
 bool_lit = ('false', 'true')
 for style in node_types:
-    print('    {{ SkColorSetRGB({}, {}, {}), SkColorSetRGB({}, {}, {}), {}, {}, {}, "{}" }},'.format(
-        style.color[0], style.color[1], style.color[2],
-        style.font_color[0], style.font_color[1], style.font_color[2],
+    print('    {{ Color {{ {}, {}, {} }}, Color {{ {}, {}, {} }}, {}, {}, {}, "{}" }},'.format(
+        style.color[0] / 255.0, style.color[1] / 255.0, style.color[2] / 255.0,
+        style.font_color[0] / 255.0, style.font_color[1] / 255.0, style.font_color[2] / 255.0,
         bool_lit[int(style.has_number)],
         bool_lit[int(style.is_filled)],
         bool_lit[int(style.is_circle)],
@@ -175,8 +176,8 @@ print('''};
 std::vector<EdgeStyle> edge_style_table {''')
 
 for style in edge_types:
-    print('    {{ SkColorSetRGB({}, {}, {}) }},'.format(
-        style[0], style[1], style[2]
+    print('    {{ Color {{ {}, {}, {} }} }},'.format(
+        style[0] / 255.0, style[1] / 255.0, style[2] / 255.0
     ))
 
 print('};')

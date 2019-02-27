@@ -3,12 +3,16 @@ project(vbc2vid CXX)
 
 find_package(Boost 1.46.0 REQUIRED COMPONENTS filesystem iostreams program_options)
 find_package(PkgConfig REQUIRED)
+find_package(Threads REQUIRED)
 
-# Find GStreamer for video output
+# Find GStreamer and Cairo for video output
 pkg_check_modules(GST REQUIRED
     gstreamer-1.0
 )
-link_directories(${GST_LIBRARY_DIRS})
+pkg_check_modules(CAIRO REQUIRED
+    cairo
+)
+link_directories(${GST_LIBRARY_DIRS} ${CAIRO_LIBRARY_DIRS})
 
 # Set subdirectory paths
 set(SCRIPT_DIR ${CMAKE_SOURCE_DIR}/tools/gen_scripts)
@@ -30,15 +34,17 @@ add_executable(vbcrender ${SOURCES})
 target_include_directories(vbcrender
     PRIVATE
     ${GST_INCLUDE_DIRS}
+    ${CAIRO_INCLUDE_DIRS}
     src
 )
 target_link_libraries(vbcrender
     PRIVATE
     ${GST_LIBRARIES}
-    SKIA::Static
+    ${CAIRO_LIBRARIES}
     Boost::boost
     Boost::filesystem
     Boost::iostreams
     Boost::program_options
+    Threads::Threads
 )
 add_dependencies(vbcrender generate_vbc_code)

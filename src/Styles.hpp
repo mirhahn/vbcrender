@@ -22,28 +22,28 @@
 #include <string>
 #include <vector>
 
-#include <SkColor.h>
+#include "Types.hpp"
 
 struct NodeStyle {
-    SkColor node_color;
-    SkColor font_color;
-    bool draw_number;
-    bool draw_filled;
-    bool draw_circle;
-    std::string name;
+    Color       node_color;     ///< Color of node marker
+    Color       font_color;     ///< Color of node text
+    bool        draw_number;    ///< Indicates whether the sequence number should be drawn
+    bool        draw_filled;    ///< Indicates whether the node marker should be filled
+    bool        draw_circle;    ///< Indicates whether the node marker is a circle or square
+    std::string name;           ///< Name of the style
 };
 
 struct EdgeStyle {
-    SkColor edge_color;
+    Color edge_color;           ///< Color of the edge
 };
 
-extern SkScalar tree_level_sep;
-extern SkScalar tree_subtree_sep;
-extern SkScalar tree_sibling_sep;
-extern SkScalar tree_node_radius;
-extern SkColor background_color;
+extern Scalar tree_level_sep;   ///< Vertical separation between nodes on subsequent levels of the tree
+extern Scalar tree_subtree_sep; ///< Horizontal separation between contour nodes in adjacent subtrees
+extern Scalar tree_sibling_sep; ///< Horizontal separation between adjacent siblings
+extern Scalar tree_node_radius; ///< Radius (or half of side length) of node markers
+extern Color background_color;  ///< Background color
 
-extern std::vector<NodeStyle> node_style_table;
-extern std::vector<EdgeStyle> edge_style_table;
+extern std::vector<NodeStyle> node_style_table; ///< Table of node styles
+extern std::vector<EdgeStyle> edge_style_table; ///< Table of edge styles
 
 #endif /* end of include guard: __VBC_STYLES_HPP */

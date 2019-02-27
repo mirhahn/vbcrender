@@ -16,13 +16,14 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <cassert>
-#include <stack>
+#include <cmath>
+#include <limits>
 
-#include <SkPaint.h>
+#include <cairo.h>
 
 #include "Styles.hpp"
 #include "Tree.hpp"
+#include "Types.hpp"
 
 Node::Node(size_t seqnum)
     : parent_(nullptr),
@@ -264,9 +265,9 @@ void Tree::update_layout() {
     }
 
     // Calculate node and subtree separation
-    const SkScalar actual_sibling_sep = 2 * tree_node_radius + tree_sibling_sep;
-    const SkScalar actual_subtree_sep = 2 * tree_node_radius + tree_subtree_sep;
-    const SkScalar actual_level_sep = 2 * tree_node_radius + tree_level_sep;
+    const Scalar actual_sibling_sep = 2 * tree_node_radius + tree_sibling_sep;
+    const Scalar actual_subtree_sep = 2 * tree_node_radius + tree_subtree_sep;
+    const Scalar actual_level_sep = 2 * tree_node_radius + tree_level_sep;
 
     // Traverse tree
     PostOrderIterator it(*this);
@@ -305,8 +306,8 @@ void Tree::update_layout() {
                 const ChildrenIterator lcont_end = node->children().end();
                 Node* lcont_node = lcont_it->get();
 
-                SkScalar lcont_shft = node->xshft_ + lcont_node->xshft_;
-                SkScalar rcont_shft = rcont_node->xshft_;
+                Scalar lcont_shft = node->xshft_ + lcont_node->xshft_;
+                Scalar rcont_shft = rcont_node->xshft_;
                 while(lcont_it != lcont_end) {
                     // Descend one level along right contour of left subtrees
                     while(rcont_node->depth() < lcont_node->depth()) {
@@ -337,7 +338,7 @@ void Tree::update_layout() {
                     }
 
                     // Calculate required adjustment
-                    SkScalar adjust = rcont_shft + rcont_node->xpre_ + actual_subtree_sep - (lcont_shft + lcont_node->xpre_);
+                    Scalar adjust = rcont_shft + rcont_node->xpre_ + actual_subtree_sep - (lcont_shft + lcont_node->xpre_);
                     if(adjust > 0.0) {
                         node->xshft_ += adjust;
                         lcont_shft += adjust;
@@ -375,7 +376,10 @@ void Tree::update_layout() {
     }
 
     // Accumulate node shift and calculate final positions
-    bbox_.setEmpty();
+    bbox_.x0 = Scalar(0.0);
+    bbox_.x1 = Scalar(0.0);
+    bbox_.y0 = Scalar(0.0);
+    bbox_.y1 = Scalar(0.0);
     PreOrderIterator pre_it(*this);
     const PreOrderIterator pre_end(children().end(), children().end());
     
@@ -388,60 +392,99 @@ void Tree::update_layout() {
             node->xacc_ += parent->xacc_;
         }
 
-        SkScalar x = node->xacc_ + node->xpre_;
-        SkScalar y = node->depth() * actual_level_sep;
-        bbox_.fRight = std::max(bbox_.fRight, x);
-        bbox_.fLeft = std::min(bbox_.fLeft, x);
-        bbox_.fBottom = std::max(bbox_.fBottom, y);
-        bbox_.fTop = std::min(bbox_.fTop, y);
+        Scalar x = node->xacc_ + node->xpre_;
+        Scalar y = node->depth() * actual_level_sep;
+        bbox_.x1 = std::max(bbox_.x1, x);
+        bbox_.x0 = std::min(bbox_.x0, x);
+        bbox_.y1 = std::max(bbox_.y1, y);
+        bbox_.y0 = std::min(bbox_.y0, y);
 
         ++pre_it;
     }
-    bbox_.inset(-SkScalar(tree_node_radius), -SkScalar(tree_node_radius));
+    bbox_.x0 -= tree_node_radius;
+    bbox_.x1 += tree_node_radius;
+    bbox_.y0 -= tree_node_radius;
+    bbox_.y1 += tree_node_radius;
 
     // Mark layout as not stale
     stale_ = false;
 }
 
 
-void Tree::draw(SkCanvas* canvas) {
+void Tree::draw(Canvas* canvas) {
+#ifdef M_PI
+    static const Scalar pi_2 = Scalar(2 * M_PI);
+#else
+    static const Scalar pi_2 = Scalar(8 * std::atan(1));
+#endif
+
     // Stop if there are no nodes
     if(children().empty()) {
         return;
     }
 
-    // Define edge paint
-    SkPaint edge_paint;
-    edge_paint.setColor(edge_style_table.front().edge_color);
-
-    // Define node paints
-    std::vector<SkPaint> node_paints(node_style_table.size());
-    for(size_t i = 0; i < node_style_table.size(); ++i) {
-        NodeStyle& style = node_style_table[i];
-        SkPaint& paint = node_paints[i];
-
-        paint.setColor(style.node_color);
-        paint.setStrokeWidth(tree_node_radius * 2);
-        paint.setStrokeCap(style.draw_circle ? SkPaint::kRound_Cap : SkPaint::kSquare_Cap);
-    }
-
     // Calculate separation between levels
-    const SkScalar actual_level_sep = SkScalar(2 * tree_node_radius + tree_level_sep);
+    const Scalar actual_level_sep = Scalar(2 * tree_node_radius + tree_level_sep);
 
-    // Draw tree in post-order traversal
-    PostOrderIterator post_it = PostOrderIterator(*this);
-    const PostOrderIterator post_end(children().end(), children().end());
-    while(post_it != post_end) {
-        Node* node = post_it->get();
+    // Fetch edge color
+    Color edge_color = edge_style_table[1].edge_color;
 
-        // Draw leading edge and node
-        if(node->parent_ != this) {
-            Node* parent = reinterpret_cast<Node*>(node->parent_);
-            canvas->drawLine(parent->xacc_ + parent->xpre_, parent->d_ * actual_level_sep, node->xacc_ + node->xpre_, node->d_ * actual_level_sep, edge_paint);
+    // Draw edges
+    cairo_set_source_rgb(
+        canvas,
+        edge_color.r,
+        edge_color.g,
+        edge_color.b
+    );
+    for(const NodePtr& node_ptr : index_) {
+        Node *node, *parent;
+        if((node = node_ptr.get()) && (parent = dynamic_cast<Node*>(node->parent_))) {
+            cairo_move_to(canvas, node->xpre_ + node->xacc_, node->d_ * actual_level_sep);
+            cairo_line_to(canvas, parent->xpre_ + parent->xacc_, parent->d_ * actual_level_sep);
         }
-        canvas->drawPoint(node->xacc_ + node->xpre_, node->d_ * actual_level_sep, node_paints[node->category()]);
+    }
+    cairo_stroke(canvas);
 
-        // Advance to next node
-        ++post_it;
+    // Draw nodes
+    for(auto node_it = index_.cbegin(); node_it != index_.cend(); ++node_it) {
+        Node* node;
+        if(!(node = node_it->get())) {
+            continue;
+        }
+
+        // Calculate node position
+        Scalar node_x = node->xacc_ + node->xpre_;
+        Scalar node_y = node->d_ * actual_level_sep;
+
+        // Set up drawing context for node
+        const NodeStyle& style = node_style_table[node->category()];
+        cairo_set_source_rgb(
+            canvas,
+            style.node_color.r,
+            style.node_color.g,
+            style.node_color.b
+        );
+
+        // Define path for node marker
+        if(style.draw_circle) {
+            cairo_new_sub_path(canvas);
+            cairo_arc(canvas, node_x, node_y, tree_node_radius, 0, pi_2);
+        }
+        else {
+            cairo_move_to(canvas, node_x - tree_node_radius, node_y - tree_node_radius);
+            cairo_rel_line_to(canvas, 0, 2 * tree_node_radius);
+            cairo_rel_line_to(canvas, 2 * tree_node_radius, 0);
+            cairo_close_path(canvas);
+        }
+
+        // Draw node
+        if(style.draw_filled) {
+            cairo_fill(canvas);
+        }
+        else {
+            cairo_stroke(canvas);
+        }
+
+        // TODO: Draw text if requested
     }
 }

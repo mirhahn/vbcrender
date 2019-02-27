@@ -280,6 +280,9 @@ int parse_program_options(int argc, char** argv) {
             return 1;
         }
     }
+    else {
+        program_options.text_align = std::make_pair(0, 2);
+    }
 
     // Throw an error if there is no input file
     if(!vm.count("input-file")) {

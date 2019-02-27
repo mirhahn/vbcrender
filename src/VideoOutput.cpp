@@ -18,22 +18,23 @@
 
 #include "Styles.hpp"
 #include "VideoOutput.hpp"
+#include "Types.hpp"
 
+#include <cmath>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <thread>
 #include <sstream>
 
+#include <cairo.h>
 #include <glib.h>
 #include <gst/gst.h>
-#include <GrContext.h>
-#include <SkImageInfo.h>
-#include <SkSurface.h>
 
 
 struct VideoOutput::Data {
     Data()
-        : img_info(),
+        : drawctx(nullptr),
           surface(nullptr),
           pool(NULL),
           pipeline(NULL),
@@ -59,10 +60,16 @@ struct VideoOutput::Data {
         if(pool) {
             g_object_unref(G_OBJECT(pool));
         }
+        if(drawctx) {
+            cairo_destroy(drawctx);
+        }
+        if(surface) {
+            cairo_surface_destroy(surface);
+        }
     }
 
-    SkImageInfo         img_info;   ///< Image memory layout information.
-    sk_sp<SkSurface>    surface;    ///< SKIA rendering surface.
+    cairo_t*            drawctx;    ///< Cairo drawing context.
+    cairo_surface_t*    surface;    ///< Cairo drawing surface.
 
     GstBufferPool*  pool;           ///< Buffer pool for video frames.
     GstElement*     pipeline;       ///< GStreamer encoding pipeline.
@@ -76,6 +83,16 @@ struct VideoOutput::Data {
     std::thread     r_thread;       ///< Separate render thread.
     GMainLoop*      loop;           ///< Main loop.
 };
+
+
+static bool is_big_endian() {
+    union {
+        uint32_t i;
+        char c[4];
+    } bint = {0x01020304};
+
+    return bint.c[0] == 1;
+}
 
 
 static void on_end_of_stream(GstBus* bus, GstMessage* message, VideoOutput::Data* user_data) {
@@ -377,9 +394,9 @@ void VideoOutput::start() {
     if(!d_) {
         d_ = std::make_unique<Data>();
 
-        // Create rendering surface for SKIA
-        d_->img_info = SkImageInfo::Make(width, height, kRGB_888x_SkColorType, kOpaque_SkAlphaType);
-        d_->surface = SkSurface::MakeRaster(d_->img_info);
+        // Create rendering surface and drawing context for Cairo
+        d_->surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, (int)width, (int)height);
+        d_->drawctx = cairo_create(d_->surface);
 
         // Try to deduce output caps based on file extension
         GstCaps* output_caps = get_caps_for_file(file);
@@ -389,7 +406,7 @@ void VideoOutput::start() {
 
         // Define remaining caps
         GstCaps* input_video_caps = gst_caps_new_simple("video/x-raw",
-            "format", G_TYPE_STRING, "RGBx",
+            "format", G_TYPE_STRING, is_big_endian() ? "xRGB" : "BGRx",
             "width", G_TYPE_INT, (int)width,
             "height", G_TYPE_INT, (int)height,
             "framerate", GST_TYPE_FRACTION, (int)fps_n, (int)fps_d,
@@ -519,20 +536,34 @@ void VideoOutput::start() {
 
 
 void VideoOutput::push_frame(TreePtr tree) {
-    // Retrieve canvas for rendering surface
-    SkCanvas* canvas = d_->surface->getCanvas();
-
     // Update layout and get tree and canvas bounding boxes
     tree->update_layout();
-    SkRect tree_bb = tree->bounding_box();
-    SkRect window = SkRect::MakeIWH(d_->img_info.width(), d_->img_info.height()).makeInset(10, 10);
+    Rect bbox = tree->bounding_box();
+    Rect window { 10, 10, Scalar(width - 10), Scalar(height - 10) };
 
     // Adjust transformation to center tree
-    canvas->setMatrix(SkMatrix::MakeRectToRect(tree_bb, window, SkMatrix::kCenter_ScaleToFit));
+    Scalar scale = std::min(
+        (window.x1 - window.x0) / (bbox.x1 - bbox.x0),
+        (window.y1 - window.y0) / (bbox.y1 - bbox.y0)
+    );
+    Scalar scaled_bbox_mid_x = 0.5 * scale * (bbox.x0 + bbox.x1);
+    Scalar scaled_bbox_mid_y = 0.5 * scale * (bbox.y0 + bbox.y1);
+    Scalar window_mid_x = 0.5 * (window.x0 + window.x1);
+    Scalar window_mid_y = 0.5 * (window.y0 + window.y1);
+
+    cairo_matrix_t matrix;
+    cairo_matrix_init(&matrix, scale, 0, 0, scale, window_mid_x - scaled_bbox_mid_x, window_mid_y - scaled_bbox_mid_y);
+    cairo_set_matrix(d_->drawctx, &matrix);
+
+    // Fill surface with background color
+    cairo_set_source_rgb(d_->drawctx, background_color.r, background_color.g, background_color.b);
+    cairo_paint(d_->drawctx);
 
     // Draw the tree
-    canvas->clear(background_color);
-    tree->draw(canvas);
+    tree->draw(d_->drawctx);
+
+    // Flush changes to rendering surface
+    cairo_surface_flush(d_->surface);
 
     // Acquire a buffer from GStreamer
     GstBuffer* buffer;
@@ -546,8 +577,20 @@ void VideoOutput::push_frame(TreePtr tree) {
         gst_buffer_unref(buffer);
         throw std::runtime_error("failed to map buffer for writing");
     }
-    SkPixmap pixmap(d_->img_info, map_info.data, d_->img_info.minRowBytes());
-    d_->surface->readPixels(pixmap, 0, 0);
+
+    unsigned char* img_src = cairo_image_surface_get_data(d_->surface);
+    unsigned char* img_dst = map_info.data;
+    size_t row_size = width * sizeof(uint32_t);
+    size_t row_stride = cairo_image_surface_get_stride(d_->surface);
+    if(row_size == row_stride) {
+        std::memcpy(img_dst, img_src, height * row_size);
+    }
+    else {
+        for(size_t row = 0; row < height; ++row) {
+            std::memcpy(img_dst + row * row_size, img_src + row * row_stride, row_size);
+        }
+    }
+
     gst_buffer_unmap(buffer, &map_info);
 
     // Attach timestamp information to the buffer

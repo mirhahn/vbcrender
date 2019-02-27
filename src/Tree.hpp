@@ -24,8 +24,7 @@
 #include <string>
 #include <vector>
 
-#include <SkCanvas.h>
-#include <SkPoint.h>
+#include "Types.hpp"
 
 
 class Edge;
@@ -71,10 +70,10 @@ private:
     std::string minfo_;         ///< Principal information
     std::string ginfo_;         ///< General information
 
-    SkScalar xpre_;             ///< X coordinate within own subtree
-    SkScalar xshft_;            ///< X shift of subtree
-    SkScalar xacc_;             ///< Cumulative X shift
-    SkScalar ext_;              ///< Extent of subtree
+    Scalar xpre_;               ///< X coordinate within own subtree
+    Scalar xshft_;              ///< X shift of subtree
+    Scalar xacc_;               ///< Cumulative X shift
+    Scalar ext_;                ///< Extent of subtree
 
 public:
     Node(size_t seqnum);
@@ -96,19 +95,6 @@ public:
     NodePtr parent() const { return dynamic_cast<Node*>(parent_) ? reinterpret_cast<Node*>(parent_)->shared_from_this() : nullptr; }
     ChildrenIterator iterator() { return childpos_; }
     ConstChildrenIterator iterator() const { return childpos_; }
-};
-
-
-class Edge {
-private:
-    NodePtr p_;
-    NodePtr c_;
-
-public:
-    Edge(NodePtr parent, NodePtr child) : p_(parent), c_(child) {}
-
-    NodePtr parent() const { return p_; }
-    NodePtr child() const { return c_; }
 };
 
 
@@ -173,14 +159,11 @@ public:
     };
 
 private:
-    double lb_;
-    double ub_;
-
-    std::vector<EdgePtr> e_;                ///< Edges
+    double lb_;                             ///< Global lower bound for objective function value
+    double ub_;                             ///< Global upper bound for objective function value
+    bool stale_;                            ///< Indicates that the layout needs to be updated
+    Rect bbox_;                             ///< Bounding box determined by last layout
     std::vector<NodePtr> index_;            ///< Nodes by sequence number
-
-    bool stale_;
-    SkRect bbox_;
 
 public:
     Tree();
@@ -198,8 +181,8 @@ public:
     void set_category(size_t node, size_t category);
 
     void update_layout();
-    SkRect bounding_box() const { return bbox_; }
-    void draw(SkCanvas* canvas);
+    Rect bounding_box() const { return bbox_; }
+    void draw(Canvas* canvas);
 };
 
 #endif /* end of include guard: __VBC_TREE_HPP */
