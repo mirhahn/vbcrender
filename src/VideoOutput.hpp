@@ -40,6 +40,7 @@ private:
     size_t cond_d;              ///< Denominator of time condensation factor.
     size_t width;               ///< Width of output video in pixels.
     size_t height;              ///< Height of output video in pixels.
+    double clock_adj;           ///< Additive adjustment for clock time.
     std::string file;           ///< Path of output file.
 
     bool clock;                 ///< Render clock overlay.
@@ -62,9 +63,11 @@ public:
     size_t get_num_frames() const;                                                                              ///< Returns number of rendered frames.
     double get_frame_time() const;                                                                              ///< Returns duration of a single frame in seconds.
     double get_stream_time() const;                                                                             ///< Returns stream time at end of last rendered frame in seconds.
+    double get_clock_time() const { return ((get_stream_time() + clock_adj) * cond_d) / cond_n; }               ///< Returns clock time at end of last rendered frame in seconds.
 
     void set_frame_rate(size_t num, size_t den);
     void set_time_condensation(size_t num, size_t den);
+    void set_time_adjustment(double adj);
     void set_dim(size_t width, size_t height);
     void set_file_path(const std::string& file);
     void set_clock(bool on);

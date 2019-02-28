@@ -183,7 +183,7 @@ public:
 
     void update_layout();
     Rect bounding_box() const { return bbox_; }
-    void draw(Canvas* canvas);
+    void draw(Canvas* canvas, bool raster_protect = false);
 };
 
 #endif /* end of include guard: __VBC_TREE_HPP */

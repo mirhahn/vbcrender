@@ -246,19 +246,19 @@ GstElement* create_bin_for_caps(const GstCaps* file_caps) {
     GstIterator* src_pads = gst_element_iterate_src_pads(muxer);
     while(!done) {
         switch(r = gst_iterator_next(src_pads, &item)) {
-        case GST_ITERATOR_RESYNC:
-            gst_iterator_resync(src_pads);
-            break;
-        case GST_ITERATOR_OK:
-            {
-                GstPad* target = GST_PAD(g_value_get_object(&item));
-                GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
-                gst_element_add_pad(bin, ghost);
-            }
-            break;
-        case GST_ITERATOR_DONE:
-        case GST_ITERATOR_ERROR:
-            done = true;
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(src_pads);
+                break;
+            case GST_ITERATOR_OK:
+                {
+                    GstPad* target = GST_PAD(g_value_get_object(&item));
+                    GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
+                    gst_element_add_pad(bin, ghost);
+                }
+                break;
+            case GST_ITERATOR_DONE:
+            case GST_ITERATOR_ERROR:
+                done = true;
         }
     }
     g_value_unset(&item);
@@ -269,19 +269,19 @@ GstElement* create_bin_for_caps(const GstCaps* file_caps) {
     GstIterator* sink_pads = gst_element_iterate_sink_pads(encoder);
     while(!done) {
         switch(r = gst_iterator_next(sink_pads, &item)) {
-        case GST_ITERATOR_RESYNC:
-            gst_iterator_resync(sink_pads);
-            break;
-        case GST_ITERATOR_OK:
-            {
-                GstPad* target = GST_PAD(g_value_get_object(&item));
-                GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
-                gst_element_add_pad(bin, ghost);
-            }
-            break;
-        case GST_ITERATOR_DONE:
-        case GST_ITERATOR_ERROR:
-            done = true;
+            case GST_ITERATOR_RESYNC:
+                gst_iterator_resync(sink_pads);
+                break;
+            case GST_ITERATOR_OK:
+                {
+                    GstPad* target = GST_PAD(g_value_get_object(&item));
+                    GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
+                    gst_element_add_pad(bin, ghost);
+                }
+                break;
+            case GST_ITERATOR_DONE:
+            case GST_ITERATOR_ERROR:
+                done = true;
         }
     }
     g_value_unset(&item);
@@ -299,6 +299,7 @@ VideoOutput::VideoOutput()
       cond_d(1),
       width(1920),
       height(1080),
+      clock_adj(0.0),
       file("vbcrender.avi"),
       clock(false),
       bounds(false),
@@ -326,7 +327,7 @@ void VideoOutput::set_frame_rate(size_t num, size_t den) {
     if(d_) {
         throw std::logic_error("attempt to set frame rate after rendering started");
     }
-    
+
     fps_n = num;
     fps_d = den;
 }
@@ -336,9 +337,18 @@ void VideoOutput::set_time_condensation(size_t num, size_t den) {
     if(d_) {
         throw std::logic_error("attempt to set time condensation factor after rendering started");
     }
-    
+
     cond_n = num;
     cond_d = den;
+}
+
+
+void VideoOutput::set_time_adjustment(double adj) {
+    if(d_) {
+        throw std::logic_error("attempt to set time adjustment after rendering started");
+    }
+
+    clock_adj = adj;
 }
 
 
@@ -406,16 +416,16 @@ void VideoOutput::start() {
 
         // Define remaining caps
         GstCaps* input_video_caps = gst_caps_new_simple("video/x-raw",
-            "format", G_TYPE_STRING, is_big_endian() ? "xRGB" : "BGRx",
-            "width", G_TYPE_INT, (int)width,
-            "height", G_TYPE_INT, (int)height,
-            "framerate", GST_TYPE_FRACTION, (int)fps_n, (int)fps_d,
-            NULL
-        );
+                "format", G_TYPE_STRING, is_big_endian() ? "xRGB" : "BGRx",
+                "width", G_TYPE_INT, (int)width,
+                "height", G_TYPE_INT, (int)height,
+                "framerate", GST_TYPE_FRACTION, (int)fps_n, (int)fps_d,
+                NULL
+                );
         GstCaps* input_text_caps = gst_caps_new_simple("text/x-raw",
-            "format", G_TYPE_STRING, "utf8",
-            NULL
-        );
+                "format", G_TYPE_STRING, "utf8",
+                NULL
+                );
 
         // Dynamically generate an encoder bin
         GstElement* encodebin = create_bin_for_caps(output_caps);
@@ -432,18 +442,18 @@ void VideoOutput::start() {
         d_->pipeline = gst_pipeline_new("render-pipeline");
 
         gst_bin_add_many(GST_BIN(d_->pipeline), d_->vidsrc, converter, encodebin, filesink, NULL);
-        
+
         // Configure first elements and link where possible
         g_object_set(G_OBJECT(d_->vidsrc),
-            "block" , TRUE              ,
-            "caps"  , input_video_caps  ,
-            "format", GST_FORMAT_TIME   ,
-            NULL
-        );
+                "block" , TRUE              ,
+                "caps"  , input_video_caps  ,
+                "format", GST_FORMAT_TIME   ,
+                NULL
+                );
         g_object_set(G_OBJECT(filesink),
-            "location", file.c_str(),
-            NULL
-        );
+                "location", file.c_str(),
+                NULL
+                );
         gst_element_link_many(converter, encodebin, filesink, NULL);
 
         if(clock || bounds) {
@@ -453,17 +463,17 @@ void VideoOutput::start() {
 
             // Configure additional elements
             g_object_set(G_OBJECT(d_->txtsrc),
-                "block" , TRUE              ,
-                "caps"  , input_text_caps   ,
-                "format", GST_FORMAT_TIME   ,
-                NULL
-            );
+                    "block" , TRUE              ,
+                    "caps"  , input_text_caps   ,
+                    "format", GST_FORMAT_TIME   ,
+                    NULL
+                    );
             g_object_set(G_OBJECT(overlay)  ,
-                "halignment", (int)text_halign,
-                "valignment", (int)text_valign,
-                "line-alignment", (int)text_halign,
-                NULL
-            );
+                    "halignment", (int)text_halign,
+                    "valignment", (int)text_valign,
+                    "line-alignment", (int)text_halign,
+                    NULL
+                    );
             gst_caps_unref(input_text_caps);
             gst_element_link_many(d_->vidsrc, overlay, converter, NULL);
             gst_element_link(d_->txtsrc, overlay);
@@ -492,50 +502,60 @@ void VideoOutput::start() {
     // Spin off new render thread.
     Data* data = d_.get();
     d_->r_thread = std::thread([data]() {
-        // Create new main context and main loop.
-        GMainContext* mainctx = g_main_context_new();
-        g_main_context_push_thread_default(mainctx);
-        data->loop = g_main_loop_new(mainctx, FALSE);
+            // Create new main context and main loop.
+            GMainContext* mainctx = g_main_context_new();
+            g_main_context_push_thread_default(mainctx);
+            data->loop = g_main_loop_new(mainctx, FALSE);
 
-        // Install watch on GStreamer bus
-        GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(data->pipeline));
-        guint watch_id = gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
+            // Install watch on GStreamer bus
+            GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(data->pipeline));
+            guint watch_id = gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
 
-        // Install termination callbacks
-        guint error_handler = g_signal_connect(bus, "message::error", (GCallback)on_stream_error, data);
-        guint eos_handler = g_signal_connect(bus, "message::eos", (GCallback)on_end_of_stream, data);
+            // Install termination callbacks
+            guint error_handler = g_signal_connect(bus, "message::error", (GCallback)on_stream_error, data);
+            guint eos_handler = g_signal_connect(bus, "message::eos", (GCallback)on_end_of_stream, data);
 
-        // Reset timestamps and frame counts
-        data->stream_time = 0;
-        data->num_frames = 0;
+            // Reset timestamps and frame counts
+            data->stream_time = 0;
+            data->num_frames = 0;
 
-        // Transition the pipeline to playing state
-        gst_element_set_state(data->pipeline, GST_STATE_READY);
-        gst_element_set_state(data->pipeline, GST_STATE_PLAYING);
+            // Transition the pipeline to playing state
+            gst_element_set_state(data->pipeline, GST_STATE_READY);
+            gst_element_set_state(data->pipeline, GST_STATE_PLAYING);
 
-        // Run the main loop
-        g_main_loop_run(data->loop);
+            // Run the main loop
+            g_main_loop_run(data->loop);
 
-        // Transition the pipeline to ready state
-        gst_element_set_state(data->pipeline, GST_STATE_READY);
+            // Transition the pipeline to ready state
+            gst_element_set_state(data->pipeline, GST_STATE_READY);
 
-        // Remove termination callbacks
-        g_signal_handler_disconnect(bus, error_handler);
-        g_signal_handler_disconnect(bus, eos_handler);
+            // Remove termination callbacks
+            g_signal_handler_disconnect(bus, error_handler);
+            g_signal_handler_disconnect(bus, eos_handler);
 
-        // Remove bus watch
-        g_source_remove(watch_id);
+            // Remove bus watch
+            GSource* watch = g_main_context_find_source_by_id(mainctx, watch_id);
+            g_source_destroy(watch);
 
-        // Destroy main context and main loop
-        g_main_loop_unref(data->loop);
-        g_main_context_pop_thread_default(mainctx);
-        g_main_context_unref(mainctx);
-        data->loop = NULL;
+            // Destroy main context and main loop
+            g_main_loop_unref(data->loop);
+            g_main_context_pop_thread_default(mainctx);
+            g_main_context_unref(mainctx);
+            data->loop = NULL;
     });
 }
 
 
 void VideoOutput::push_frame(TreePtr tree) {
+    // Constant for square root of 2
+#ifndef M_SQRT1_2
+    static const Scalar sqrt2_half = Scalar(M_SQRT1_2);
+#elif defined(M_SQRT2)
+    static const Scalar sqrt2_half = Scalar(1 / M_SQRT2);
+#else
+    static const Scalar sqrt2_half = std::sqrt(0.5);
+#endif
+
     // Update layout and get tree and canvas bounding boxes
     tree->update_layout();
     Rect bbox = tree->bounding_box();
@@ -543,9 +563,9 @@ void VideoOutput::push_frame(TreePtr tree) {
 
     // Adjust transformation to center tree
     Scalar scale = std::min(
-        (window.x1 - window.x0) / (bbox.x1 - bbox.x0),
-        (window.y1 - window.y0) / (bbox.y1 - bbox.y0)
-    );
+            (window.x1 - window.x0) / (bbox.x1 - bbox.x0),
+            (window.y1 - window.y0) / (bbox.y1 - bbox.y0)
+            );
     Scalar scaled_bbox_mid_x = 0.5 * scale * (bbox.x0 + bbox.x1);
     Scalar scaled_bbox_mid_y = 0.5 * scale * (bbox.y0 + bbox.y1);
     Scalar window_mid_x = 0.5 * (window.x0 + window.x1);
@@ -557,10 +577,11 @@ void VideoOutput::push_frame(TreePtr tree) {
 
     // Fill surface with background color
     cairo_set_source_rgb(d_->drawctx, background_color.r, background_color.g, background_color.b);
+    cairo_set_operator(d_->drawctx, CAIRO_OPERATOR_OVER);
     cairo_paint(d_->drawctx);
 
-    // Draw the tree
-    tree->draw(d_->drawctx);
+    // Draw the tree with raster protection
+    tree->draw(d_->drawctx, true);
 
     // Flush changes to rendering surface
     cairo_surface_flush(d_->surface);
@@ -603,12 +624,12 @@ void VideoOutput::push_frame(TreePtr tree) {
         bool empty = true;
 
         if(clock) {
-            guint64 timestamp;
-            if(cond_n != cond_d) {
-                timestamp = gst_util_uint64_scale(GST_BUFFER_PTS(buffer), cond_d, cond_n);
+            guint64 timestamp = GST_BUFFER_PTS(buffer);
+            if(clock_adj) {
+                timestamp += guint64(clock_adj * GST_SECOND);
             }
-            else {
-                timestamp = GST_BUFFER_PTS(buffer);
+            if(cond_n != cond_d) {
+                timestamp = gst_util_uint64_scale(timestamp, cond_d, cond_n);
             }
 
             const auto fill = str.fill('0');

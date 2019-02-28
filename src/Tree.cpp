@@ -411,7 +411,7 @@ void Tree::update_layout() {
 }
 
 
-void Tree::draw(Canvas* canvas) {
+void Tree::draw(Canvas* canvas, bool raster_protect) {
 #ifdef M_PI
     static const Scalar pi_2 = Scalar(2 * M_PI);
 #else
@@ -423,11 +423,22 @@ void Tree::draw(Canvas* canvas) {
         return;
     }
 
-    // Calculate separation between levels
-    const Scalar actual_level_sep = Scalar(2 * tree_node_radius + tree_level_sep);
+    // Get transformation matrix and determine scaling
+    cairo_matrix_t matrix;
+    cairo_get_matrix(canvas, &matrix);
+    const Scalar scale = std::min(std::fabs(matrix.xx), std::fabs(matrix.yy));
+
+    // Calculate adjusted dimensions
+    const Scalar actual_line_width  = raster_protect ? std::max(Scalar(2), 1 / scale) : Scalar(2);
+    const Scalar actual_node_radius = raster_protect ? std::max(tree_node_radius, 1 / scale) : tree_node_radius;
+    const Scalar actual_level_sep   = 2 * tree_node_radius + tree_level_sep;
+    const Scalar actual_node_side   = 2 * actual_node_radius;
 
     // Fetch edge color
     Color edge_color = edge_style_table[1].edge_color;
+
+    // Set line width
+    cairo_set_line_width(canvas, actual_line_width);
 
     // Draw edges
     cairo_set_source_rgb(
@@ -466,15 +477,12 @@ void Tree::draw(Canvas* canvas) {
         );
 
         // Define path for node marker
+        cairo_new_sub_path(canvas);
         if(style.draw_circle) {
-            cairo_new_sub_path(canvas);
-            cairo_arc(canvas, node_x, node_y, tree_node_radius, 0, pi_2);
+            cairo_arc(canvas, node_x, node_y, actual_node_radius, 0, pi_2);
         }
         else {
-            cairo_move_to(canvas, node_x - tree_node_radius, node_y - tree_node_radius);
-            cairo_rel_line_to(canvas, 0, 2 * tree_node_radius);
-            cairo_rel_line_to(canvas, 2 * tree_node_radius, 0);
-            cairo_close_path(canvas);
+            cairo_rectangle(canvas, node_x - actual_node_radius, node_y - actual_node_radius, actual_node_side, actual_node_side);
         }
 
         // Draw node

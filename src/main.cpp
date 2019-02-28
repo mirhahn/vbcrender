@@ -62,6 +62,9 @@ struct {
     size_t video_condense_n;                    ///< Numerator of time condensation factor.
     size_t video_condense_d;                    ///< Denominator of time condensation factor.
 
+    double start_timestamp;                     ///< VBC timestamp to start rendering.
+    double stop_timestamp;                      ///< VBC timestamp to stop rendering.
+
     bool                        clock;          ///< Render clock overlay.
     bool                        bounds;         ///< Render bound overlay.
     std::pair<size_t, size_t>   text_align;     ///< Alignment code for text overlay.
@@ -77,6 +80,21 @@ void print_usage_message(const char* executable, std::ostream& out) {
 
         // Print usage line
         out << "Usage: " << command << " [args...] [-o output-file] input-file\n";
+}
+
+
+std::string timestamp_string(double time) {
+    std::ostringstream str;
+
+    str.fill('0');
+    str.precision(6);
+    std::fixed(str);
+
+    str << std::setw(2) << int(time / 3600) << ':'
+        << std::setw(2) << std::abs(int(std::fmod(time, 3600) / 60)) << ':'
+        << std::setw(9) << std::abs(std::fmod(time, 60));
+
+    return str.str();
 }
 
 
@@ -148,10 +166,29 @@ void parse_pango_alignment(const std::string& str, std::pair<size_t, size_t>& al
 }
 
 
+double parse_timestamp(const std::string& str) {
+    double timestamp;
+    double component;
+    std::istringstream in(str);
+
+    timestamp = 0.0;
+    do {
+        timestamp *= 60;
+        if(!(in >> component)) {
+            throw std::invalid_argument("not a valid timestamp");
+        }
+        timestamp += component;
+    } while(in.get() == ':');
+    return timestamp;
+}
+
+
 int parse_program_options(int argc, char** argv) {
     std::string text_align;
     std::string fps_frac;
     std::string condense_frac;
+    std::string start_time;
+    std::string end_time;
 
     // Describe program options
     po::options_description visible("Allowed options");
@@ -180,6 +217,14 @@ int parse_program_options(int argc, char** argv) {
             "condense",
             po::value<std::string>(&condense_frac),
             "specify time condensation factor (fraction)"
+        )(
+            "start-time",
+            po::value<std::string>(&start_time),
+            "start video at given event time"
+        )(
+            "end-time",
+            po::value<std::string>(&end_time),
+            "end video at given event time"
         )(
             "clock",
             po::bool_switch(&program_options.clock),
@@ -271,6 +316,43 @@ int parse_program_options(int argc, char** argv) {
         program_options.video_condense_d = 1;
     }
 
+    // Parse start timestamp
+    if(vm.count("start-time")) {
+        try {
+            program_options.start_timestamp = parse_timestamp(start_time);
+        }
+        catch(const std::invalid_argument& err) {
+            std::cerr << "Error parsing start time: " << err.what() << std::endl;
+            return 1;
+        }
+
+        if(program_options.start_timestamp < 0) {
+            std::cerr << "Warning: adjusting start time to 0.0" << std::endl;
+            program_options.start_timestamp = 0;
+        }
+    }
+    else {
+        program_options.start_timestamp = 0;
+    }
+
+    // Parse end timestamp
+    if(vm.count("end-time")) {
+        try {
+            program_options.stop_timestamp = parse_timestamp(end_time);
+        }
+        catch(const std::invalid_argument& err) {
+            std::cerr << "Error parsing end time: " << err.what() << std::endl;
+            return 1;
+        }
+
+        if(program_options.stop_timestamp <= program_options.start_timestamp) {
+            std::cerr << "Warning: end time is before start time and will be ignored" << std::endl;
+        }
+    }
+    else {
+        program_options.stop_timestamp = 0;
+    }
+
     // Parse overlay alignment
     if(vm.count("overlay-pos") > 0) {
         try {
@@ -300,21 +382,21 @@ int parse_program_options(int argc, char** argv) {
 
 
 void print_status_header(std::ostream& out) {
-    out << "-----------+-----------------+-----------------\n"
+    out << "-----------+-----------------+-----------------+-----------------\n"
         << std::setw(10) << "runtime" << " | "
+        << std::setw(15) << "clock_time" << " | "
         << std::setw(15) << "stream_time" << " | "
         << std::setw(15) << "frames\n"
-        << "-----------+-----------------+-----------------" << std::endl;
+        << "-----------+-----------------+-----------------+-----------------" << std::endl;
 }
 
 
-void print_status_line(double runtime, double stream_time, size_t frames, std::ostream& out) {
+void print_status_line(double runtime, double clock_time, double stream_time, size_t frames, std::ostream& out) {
     const auto fill = out.fill();
     const auto prec = out.precision();
     out << std::fixed << std::setprecision(0) << std::setw(10) << runtime << " | "
-        << std::setfill('0') << std::setw(2) << int(stream_time / 3600) << ':'
-        << std::setw(2) << int(std::fmod(stream_time, 3600) / 60) << ':'
-        << std::fixed << std::setprecision(6) << std::setw(9) << std::fmod(stream_time, 60) << " | "
+        << std::setw(15) << timestamp_string(clock_time) << " | "
+        << std::setw(15) << timestamp_string(stream_time) << " | "
         << std::setfill(fill) << std::setw(15) << frames << std::endl;
     out.precision(prec);
 }
@@ -371,6 +453,7 @@ int main(int argc, char** argv) {
         program_options.video_condense_n,
         program_options.video_condense_d
     );
+    vid_out->set_time_adjustment(program_options.start_timestamp);
     vid_out->set_clock(program_options.clock);
     vid_out->set_bounds(program_options.bounds);
     vid_out->set_text_align(program_options.text_align.first, program_options.text_align.second);
@@ -389,7 +472,7 @@ int main(int argc, char** argv) {
             // Wait for the event queue to be populated
             vbc_in->wait();
         }
-        else if(vbc_in->get_next_timestamp() > stream_time) {
+        else if(vbc_in->get_next_timestamp() > stream_time + program_options.start_timestamp) {
             // Render a video frame
             vid_out->push_frame(tree);
             stream_time = vid_out->get_stream_time();
@@ -403,13 +486,24 @@ int main(int argc, char** argv) {
                 if(reports_given == 0 || (program_options.header_repeat && reports_given % program_options.header_repeat == 0)) {
                     print_status_header(std::cout);
                 }
-                print_status_line(current_runtime, stream_time, vid_out->get_num_frames(), std::cout);
+                print_status_line(
+                    current_runtime,
+                    vid_out->get_clock_time(),
+                    stream_time,
+                    vid_out->get_num_frames(),
+                    std::cout
+                );
                 ++reports_given;
                 last_report_cycle = current_report_cycle;
             }
         }
         else if(!vbc_in->advance()) {
             std::cerr << "ERROR: Could not advance VBC state." << std::endl;
+            break;
+        }
+
+        // Check for early termination
+        if(program_options.stop_timestamp > program_options.start_timestamp && stream_time > program_options.stop_timestamp - program_options.start_timestamp) {
             break;
         }
     }
