@@ -76,7 +76,7 @@ This should generate a standalone executable `./vbcrender` that can be moved to 
 
 ## Authors
 
-* **Mirko Hahn** - *Initial developer* - [PurpleBooth](https://github.com/mirhahn)
+* **Mirko Hahn** - *Initial developer* - [mirhahn](https://github.com/mirhahn)
 
 See also the list of [contributors](https://github.com/mirhahn/vbcrender/contributors) who participated in this project.
 
