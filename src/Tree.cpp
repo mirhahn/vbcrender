@@ -282,12 +282,12 @@ void Tree::update_layout() {
 
         // Set preliminary coordinate based on children
         if(node->children().empty()) {
-            node->xpre_ = 0.0;
+            node->x_ = 0.0;
         }
         else {
             Node* left = node->children().front().get();
             Node* right = node->children().back().get();
-            node->xpre_ = (left->xpre_ + left->xshft_ + right->xpre_ + right->xshft_) / 2;
+            node->x_ = (left->x_ + left->xshft_ + right->x_ + right->xshft_) / 2;
         }
 
         // Set shift based on left siblings
@@ -298,7 +298,7 @@ void Tree::update_layout() {
             // Set initial shift based on immediate sibling
             ChildrenIterator rcont_it = std::prev(node->childpos_);
             Node* rcont_node = rcont_it->get();
-            node->xshft_ = rcont_node->xshft_ + rcont_node->xpre_ + actual_sibling_sep - node->xpre_;
+            node->xshft_ = rcont_node->xshft_ + rcont_node->x_ + actual_sibling_sep - node->x_;
 
             // Begin descent along contour
             if(!node->children().empty()) {
@@ -338,7 +338,7 @@ void Tree::update_layout() {
                     }
 
                     // Calculate required adjustment
-                    Scalar adjust = rcont_shft + rcont_node->xpre_ + actual_subtree_sep - (lcont_shft + lcont_node->xpre_);
+                    Scalar adjust = rcont_shft + rcont_node->x_ + actual_subtree_sep - (lcont_shft + lcont_node->x_);
                     if(adjust > 0.0) {
                         node->xshft_ += adjust;
                         lcont_shft += adjust;
@@ -386,18 +386,17 @@ void Tree::update_layout() {
     while(pre_it != pre_end) {
         Node* node = pre_it->get();
 
-        node->xacc_ = node->xshft_;
         if(node->parent_ != this) {
             Node* parent = reinterpret_cast<Node*>(node->parent_);
-            node->xacc_ += parent->xacc_;
+            node->xshft_ += parent->xshft_;
         }
 
-        Scalar x = node->xacc_ + node->xpre_;
-        Scalar y = node->depth() * actual_level_sep;
-        bbox_.x1 = std::max(bbox_.x1, x);
-        bbox_.x0 = std::min(bbox_.x0, x);
-        bbox_.y1 = std::max(bbox_.y1, y);
-        bbox_.y0 = std::min(bbox_.y0, y);
+        node->x_ += node->xshft_;
+        node->y_ = node->depth() * actual_level_sep;
+        bbox_.x1 = std::max(bbox_.x1, node->x_);
+        bbox_.x0 = std::min(bbox_.x0, node->x_);
+        bbox_.y1 = std::max(bbox_.y1, node->y_);
+        bbox_.y0 = std::min(bbox_.y0, node->y_);
 
         ++pre_it;
     }
@@ -431,7 +430,6 @@ void Tree::draw(Canvas* canvas, bool raster_protect) {
     // Calculate adjusted dimensions
     const Scalar actual_line_width  = raster_protect ? std::max(Scalar(2), 1 / scale) : Scalar(2);
     const Scalar actual_node_radius = raster_protect ? std::max(tree_node_radius, 1 / scale) : tree_node_radius;
-    const Scalar actual_level_sep   = 2 * tree_node_radius + tree_level_sep;
     const Scalar actual_node_side   = 2 * actual_node_radius;
 
     // Fetch edge color
@@ -450,8 +448,8 @@ void Tree::draw(Canvas* canvas, bool raster_protect) {
     for(const NodePtr& node_ptr : index_) {
         Node *node, *parent;
         if((node = node_ptr.get()) && (parent = dynamic_cast<Node*>(node->parent_))) {
-            cairo_move_to(canvas, node->xpre_ + node->xacc_, node->d_ * actual_level_sep);
-            cairo_line_to(canvas, parent->xpre_ + parent->xacc_, parent->d_ * actual_level_sep);
+            cairo_move_to(canvas, node->x_, node->y_);
+            cairo_line_to(canvas, parent->x_, parent->y_);
         }
     }
     cairo_stroke(canvas);
@@ -462,11 +460,6 @@ void Tree::draw(Canvas* canvas, bool raster_protect) {
         if(!(node = node_it->get())) {
             continue;
         }
-
-        // Calculate node position
-        Scalar node_x = node->xacc_ + node->xpre_;
-        Scalar node_y = node->d_ * actual_level_sep;
-
         // Set up drawing context for node
         const NodeStyle& style = node_style_table[node->category()];
         cairo_set_source_rgb(
@@ -479,10 +472,10 @@ void Tree::draw(Canvas* canvas, bool raster_protect) {
         // Define path for node marker
         cairo_new_sub_path(canvas);
         if(style.draw_circle) {
-            cairo_arc(canvas, node_x, node_y, actual_node_radius, 0, pi_2);
+            cairo_arc(canvas, node->x_, node->y_, actual_node_radius, 0, pi_2);
         }
         else {
-            cairo_rectangle(canvas, node_x - actual_node_radius, node_y - actual_node_radius, actual_node_side, actual_node_side);
+            cairo_rectangle(canvas, node->x_ - actual_node_radius, node->y_ - actual_node_radius, actual_node_side, actual_node_side);
         }
 
         // Draw node

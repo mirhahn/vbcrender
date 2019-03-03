@@ -71,10 +71,9 @@ private:
     std::string minfo_;         ///< Principal information
     std::string ginfo_;         ///< General information
 
-    Scalar xpre_;               ///< X coordinate within own subtree
+    Scalar x_;                  ///< X coordinate
+    Scalar y_;                  ///< Y coordinate
     Scalar xshft_;              ///< X shift of subtree
-    Scalar xacc_;               ///< Cumulative X shift
-    Scalar ext_;                ///< Extent of subtree
 
 public:
     Node(size_t seqnum);
