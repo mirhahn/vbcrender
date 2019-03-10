@@ -188,6 +188,7 @@ Tree::Tree()
     : NodeBase(),
       lb_(-std::numeric_limits<double>::infinity()),
       ub_(std::numeric_limits<double>::infinity()),
+      nvert_(0),
       stale_(true),
       bbox_()
 {}
@@ -220,7 +221,8 @@ void Tree::add_node(size_t seqnum, size_t parent_seqnum, size_t category) {
     // Set node category
     node->set_category(category);
 
-    // Mark layout as stale
+    // Increase node count and mark layout as stale
+    ++nvert_;
     stale_ = true;
 }
 
@@ -238,7 +240,8 @@ void Tree::remove_node(size_t seqnum) {
     // Remove node from sequence index
     index_[seqnum].reset();
 
-    // Mark layout as stale
+    // Decrease node count and mark layout as stale
+    --nvert_;
     stale_ = true;
 }
 
@@ -407,85 +410,4 @@ void Tree::update_layout() {
 
     // Mark layout as not stale
     stale_ = false;
-}
-
-
-void Tree::draw(Canvas* canvas, bool raster_protect) {
-#ifdef M_PI
-    static const Scalar pi_2 = Scalar(2 * M_PI);
-#else
-    static const Scalar pi_2 = Scalar(8 * std::atan(1));
-#endif
-
-    // Stop if there are no nodes
-    if(children().empty()) {
-        return;
-    }
-
-    // Get transformation matrix and determine scaling
-    cairo_matrix_t matrix;
-    cairo_get_matrix(canvas, &matrix);
-    const Scalar scale = std::min(std::fabs(matrix.xx), std::fabs(matrix.yy));
-
-    // Calculate adjusted dimensions
-    const Scalar actual_line_width  = raster_protect ? std::max(Scalar(2), 1 / scale) : Scalar(2);
-    const Scalar actual_node_radius = raster_protect ? std::max(tree_node_radius, 1 / scale) : tree_node_radius;
-    const Scalar actual_node_side   = 2 * actual_node_radius;
-
-    // Fetch edge color
-    Color edge_color = edge_style_table[1].edge_color;
-
-    // Set line width
-    cairo_set_line_width(canvas, actual_line_width);
-
-    // Draw edges
-    cairo_set_source_rgb(
-        canvas,
-        edge_color.r,
-        edge_color.g,
-        edge_color.b
-    );
-    for(const NodePtr& node_ptr : index_) {
-        Node *node, *parent;
-        if((node = node_ptr.get()) && (parent = dynamic_cast<Node*>(node->parent_))) {
-            cairo_move_to(canvas, node->x_, node->y_);
-            cairo_line_to(canvas, parent->x_, parent->y_);
-        }
-    }
-    cairo_stroke(canvas);
-
-    // Draw nodes
-    for(auto node_it = index_.cbegin(); node_it != index_.cend(); ++node_it) {
-        Node* node;
-        if(!(node = node_it->get())) {
-            continue;
-        }
-        // Set up drawing context for node
-        const NodeStyle& style = node_style_table[node->category()];
-        cairo_set_source_rgb(
-            canvas,
-            style.node_color.r,
-            style.node_color.g,
-            style.node_color.b
-        );
-
-        // Define path for node marker
-        cairo_new_sub_path(canvas);
-        if(style.draw_circle) {
-            cairo_arc(canvas, node->x_, node->y_, actual_node_radius, 0, pi_2);
-        }
-        else {
-            cairo_rectangle(canvas, node->x_ - actual_node_radius, node->y_ - actual_node_radius, actual_node_side, actual_node_side);
-        }
-
-        // Draw node
-        if(style.draw_filled) {
-            cairo_fill(canvas);
-        }
-        else {
-            cairo_stroke(canvas);
-        }
-
-        // TODO: Draw text if requested
-    }
 }

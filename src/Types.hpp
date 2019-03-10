@@ -19,11 +19,6 @@
 #ifndef __VBC_TYPES_HPP
 #define __VBC_TYPES_HPP
 
-#include <cairo.h>
-
-// Forward declaration for the drawing context
-typedef cairo_t Canvas;
-
 // Scalar type preferred by the drawing library
 typedef double Scalar;
 

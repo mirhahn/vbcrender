@@ -385,18 +385,18 @@ void print_status_header(std::ostream& out) {
     out << "-----------+-----------------+-----------------+-----------------\n"
         << std::setw(10) << "runtime" << " | "
         << std::setw(15) << "clock_time" << " | "
-        << std::setw(15) << "stream_time" << " | "
+        << std::setw(15) << "buffer_time" << " | "
         << std::setw(15) << "frames\n"
         << "-----------+-----------------+-----------------+-----------------" << std::endl;
 }
 
 
-void print_status_line(double runtime, double clock_time, double stream_time, size_t frames, std::ostream& out) {
+void print_status_line(double runtime, double clock_time, double buffer_time, size_t frames, std::ostream& out) {
     const auto fill = out.fill();
     const auto prec = out.precision();
     out << std::fixed << std::setprecision(0) << std::setw(10) << runtime << " | "
         << std::setw(15) << timestamp_string(clock_time) << " | "
-        << std::setw(15) << timestamp_string(stream_time) << " | "
+        << std::setw(15) << timestamp_string(buffer_time) << " | "
         << std::setfill(fill) << std::setw(15) << frames << std::endl;
     out.precision(prec);
 }
@@ -414,7 +414,7 @@ int main(int argc, char** argv) {
     size_t current_report_cycle = 0;
     size_t reports_given = 0;
     double current_runtime;
-    double stream_time;
+    double buffer_time;
 
     // Initialize GStreamer
     gst_init(&argc, &argv);
@@ -460,7 +460,7 @@ int main(int argc, char** argv) {
     vid_out->start();
 
     start_time = clock.now();
-    stream_time = vid_out->get_stream_time();
+    buffer_time = vid_out->get_buffer_time();
     while(vbc_in->get_state() == VbcReader::Processing) {
         // Check if termination has been requested
         if(signal_terminate) {
@@ -468,47 +468,56 @@ int main(int argc, char** argv) {
             break;
         }
 
-        if(!vbc_in->has_next()) {
-            // Wait for the event queue to be populated
-            vbc_in->wait();
-        }
-        else if(vbc_in->get_next_timestamp() > stream_time + program_options.start_timestamp) {
-            // Render a video frame
-            vid_out->push_frame(tree);
-            stream_time = vid_out->get_stream_time();
+        // Determine whether new frame should be pushed
+        if(vbc_in->has_next()) {
+            bool should_show = vbc_in->get_next_timestamp() > buffer_time + program_options.start_timestamp;
 
-            // Find current runtime and calculate report cycles
-            current_runtime = std::chrono::duration_cast<Seconds>(clock.now() - start_time).count();
-            current_report_cycle = size_t(current_runtime / program_options.report_interval);
+            // Push frame if necessary
+            if(should_show) {
+                vid_out->push_frame(tree);
+                buffer_time = vid_out->get_buffer_time();
+            }
 
-            // Print current state
-            if(current_report_cycle != last_report_cycle) {
-                if(reports_given == 0 || (program_options.header_repeat && reports_given % program_options.header_repeat == 0)) {
-                    print_status_header(std::cout);
-                }
-                print_status_line(
-                    current_runtime,
-                    vid_out->get_clock_time(),
-                    stream_time,
-                    vid_out->get_num_frames(),
-                    std::cout
-                );
-                ++reports_given;
-                last_report_cycle = current_report_cycle;
+            // Determine whether state should be advanced
+            bool should_advance = vbc_in->get_next_timestamp() <= buffer_time + program_options.start_timestamp;
+
+            // Advance tree state if necessary
+            if(should_advance && !vbc_in->advance()) {
+                std::cerr << "ERROR: Could not advance VBC state." << std::endl;
+                break;
             }
         }
-        else if(!vbc_in->advance()) {
-            std::cerr << "ERROR: Could not advance VBC state." << std::endl;
-            break;
+        else {
+            vbc_in->wait();
+        }
+
+        // Find current runtime and calculate report cycles
+        current_runtime = std::chrono::duration_cast<Seconds>(clock.now() - start_time).count();
+        current_report_cycle = size_t(current_runtime / program_options.report_interval);
+
+        // Print current state
+        if(current_report_cycle != last_report_cycle) {
+            if(reports_given == 0 || (program_options.header_repeat && reports_given % program_options.header_repeat == 0)) {
+                print_status_header(std::cout);
+            }
+            print_status_line(
+                current_runtime,
+                vid_out->get_clock_time(),
+                buffer_time,
+                vid_out->get_num_frames(),
+                std::cout
+            );
+            ++reports_given;
+            last_report_cycle = current_report_cycle;
         }
 
         // Check for early termination
-        if(program_options.stop_timestamp > program_options.start_timestamp && stream_time > program_options.stop_timestamp - program_options.start_timestamp) {
+        if(program_options.stop_timestamp > program_options.start_timestamp && buffer_time >= program_options.stop_timestamp - program_options.start_timestamp) {
             break;
         }
     }
 
-    vbc_in->close();
+    vbc_in->close(); 
     vid_out->stop();
 
     gst_deinit();

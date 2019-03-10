@@ -16,61 +16,52 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "Renderer.hpp"
 #include "Styles.hpp"
-#include "VideoOutput.hpp"
 #include "Types.hpp"
+#include "VideoOutput.hpp"
 
 #include <cmath>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <thread>
+#include <mutex>
+#include <queue>
 #include <sstream>
+#include <thread>
 
-#include <cairo.h>
 #include <glib.h>
 #include <gst/gst.h>
 
 
 struct VideoOutput::Data {
-    Data()
-        : drawctx(nullptr),
-          surface(nullptr),
+    Data(VideoOutput* parent)
+        : parent(parent),
           pool(NULL),
           pipeline(NULL),
           vidsrc(NULL),
           txtsrc(NULL),
           stream_time(0),
           num_frames(0),
-          r_thread()
+          push_source(NULL)
     {}
     Data(const Data&) = delete;
     Data(Data&&) = delete;
     ~Data() {
-        if(r_thread.joinable()) {
-            GstFlowReturn ret;
-            g_signal_emit_by_name(vidsrc, "end-of-stream", &ret);
-            if(ret == GST_FLOW_OK) {
-                r_thread.join();
-            }
-        }
         if(pipeline) {
             g_object_unref(G_OBJECT(pipeline));
         }
         if(pool) {
             g_object_unref(G_OBJECT(pool));
         }
-        if(drawctx) {
-            cairo_destroy(drawctx);
-        }
-        if(surface) {
-            cairo_surface_destroy(surface);
-        }
     }
 
-    cairo_t*            drawctx;    ///< Cairo drawing context.
-    cairo_surface_t*    surface;    ///< Cairo drawing surface.
+    VideoOutput*    parent;
 
+    std::mutex      lock;
+    std::deque<std::pair<double, double>> bound_queue;
+
+    RendererPtr     renderer;       ///< Renderer for video frames.
     GstBufferPool*  pool;           ///< Buffer pool for video frames.
     GstElement*     pipeline;       ///< GStreamer encoding pipeline.
     GstElement*     vidsrc;         ///< Source element for rendered frames.
@@ -78,216 +69,348 @@ struct VideoOutput::Data {
 
     guint64         frame_duration; ///< Duration of single frame in nanoseconds.
     guint64         stream_time;    ///< Current stream timestamp.
+    guint64         buffer_time;    ///< Time up to which the task queue has been filled.
     guint64         num_frames;     ///< Number of frames rendered so far.
 
-    std::thread     r_thread;       ///< Separate render thread.
     GMainLoop*      loop;           ///< Main loop.
+    GSource*        push_source;    ///< GSource responsible pushing video data.
 };
 
+namespace {
+    gboolean push_video_data(VideoOutput::Data* user_data) {
+        GstFlowReturn ret;
+        double lb, ub;
 
-static bool is_big_endian() {
-    union {
-        uint32_t i;
-        char c[4];
-    } bint = {0x01020304};
+        // Acquire a buffer from GStreamer
+        GstBuffer* buffer;
+        ret = gst_buffer_pool_acquire_buffer(user_data->pool, &buffer, NULL);
+        if(ret != GST_FLOW_OK) {
+            return FALSE;
+        }
 
-    return bint.c[0] == 1;
-}
+        // Copy pixels to the buffer
+        GstMapInfo map_info;
+        if(!gst_buffer_map(buffer, &map_info, GST_MAP_WRITE)) {
+            std::cerr << "ERROR: failed to map GStreamer pixel data buffer" << std::endl;
 
+            gst_buffer_unref(buffer);
+            return FALSE;
+        }
 
-static void on_end_of_stream(GstBus* bus, GstMessage* message, VideoOutput::Data* user_data) {
-    g_main_loop_quit(user_data->loop);
-}
+        {
+            std::lock_guard<std::mutex> lock(user_data->lock);
 
+            Renderer::PullStatus status = user_data->renderer->pull_frame(map_info.data, map_info.size, false);
+            gst_buffer_unmap(buffer, &map_info);
 
-static void on_stream_error(GstBus* bus, GstMessage* message, VideoOutput::Data* user_data) {
-    g_main_loop_quit(user_data->loop);
-}
+            switch(status) {
+                case Renderer::Pull_Success:
+                    std::tie(lb, ub) = user_data->bound_queue.front();
+                    user_data->bound_queue.pop_front();
+                    break;
+                case Renderer::Pull_Block:
+                    gst_buffer_unref(buffer);
+                    return TRUE;
+                case Renderer::Pull_Flush:
+                    gst_buffer_unref(buffer);
+                    g_signal_emit_by_name(user_data->vidsrc, "end-of-stream", &ret);
+                    return FALSE;
+            }
+        }
 
+        // Attach timestamp information to the buffer
+        GST_BUFFER_DURATION(buffer) = user_data->frame_duration;
+        GST_BUFFER_PTS(buffer) = user_data->stream_time;
 
-static GstCaps* get_caps_for_file(const std::string& filename) {
-    // Extract file extension
-    size_t last_period = filename.rfind('.');
-    gchar* file_ext;
-    if(last_period >= filename.size()) {
-        file_ext = g_utf8_casefold("avi", 3);
+        // Create a text buffer for the overlay
+        if(user_data->txtsrc) {
+            std::ostringstream str;
+            bool empty = true;
+
+            if(user_data->parent->get_clock()) {
+                guint64 timestamp = GST_BUFFER_PTS(buffer);
+
+                double adj_secs = user_data->parent->get_time_adjustment();
+                if(adj_secs) {
+                    timestamp += gint64(adj_secs * GST_SECOND);
+                }
+
+                uint64_t cond_n, cond_d;
+                std::tie(cond_n, cond_d) = user_data->parent->get_time_condensation();
+                if(cond_n != cond_d) {
+                    timestamp = gst_util_uint64_scale(timestamp, cond_d, cond_n);
+                }
+
+                const auto fill = str.fill('0');
+                str << std::setw(2) << (timestamp / (3600 * GST_SECOND)) << ':'
+                    << std::setw(2) << ((timestamp % (3600 * GST_SECOND)) / (60 * GST_SECOND)) << ':'
+                    << std::setw(2) << ((timestamp % (60 * GST_SECOND)) / GST_SECOND) << '.'
+                    << std::setw(3) << ((timestamp % GST_SECOND) / (GST_SECOND / 1000));
+                str.fill(fill);
+
+                empty = false;
+            }
+
+            if(user_data->parent->get_bounds()) {
+                if(std::isfinite(ub)) {
+                    if(!empty) {
+                        str << '\n';
+                    }
+                    str << "UB = " << ub;
+                    empty = false;
+                }
+
+                if(std::isfinite(lb)) {
+                    if(!empty) {
+                        str << '\n';
+                    }
+                    str << "LB = " << lb;
+                }
+            }
+
+            // Create a buffer with the text data
+            std::string msg = str.str();
+            gchar* data = g_strndup(msg.c_str(), msg.size());
+            GstBuffer* txtbuf = gst_buffer_new_wrapped(data, msg.size());
+
+            // Set buffer metadata
+            GST_BUFFER_DURATION(txtbuf) = user_data->frame_duration;
+            GST_BUFFER_PTS(txtbuf) = user_data->stream_time;
+
+            // Push buffer into the pipeline
+            GstFlowReturn ret;
+            g_signal_emit_by_name(user_data->txtsrc, "push-buffer", txtbuf, &ret);
+            gst_buffer_unref(txtbuf);
+        }
+
+        // Advance timestamps
+        user_data->stream_time += user_data->frame_duration;
+        ++user_data->num_frames;
+
+        // Push buffer into the pipeline
+        g_signal_emit_by_name(user_data->vidsrc, "push-buffer", buffer, &ret);
+        gst_buffer_unref(buffer);
+
+        if(ret != GST_FLOW_OK) {
+            std::cerr << "ERROR: could not push buffer to encoding pipeline" << std::endl;
+            return FALSE;
+        }
+
+        return TRUE;
     }
-    else {
-        file_ext = g_utf8_casefold(&filename[last_period + 1], filename.size() - last_period - 1);
+
+
+    void on_end_of_stream(GstBus* bus, GstMessage* message, VideoOutput::Data* user_data) {
+        g_main_loop_quit(user_data->loop);
     }
 
-    // Find typefinder of highest rank associated with the extension
-    GstTypeFindFactory* best_type = NULL;
-    GList* all_types = gst_type_find_factory_get_list();
-    for(GList* l = all_types; l && !best_type; l = l->next) {
-        GstTypeFindFactory *type = GST_TYPE_FIND_FACTORY(l->data);
-        const gchar* const *exts = gst_type_find_factory_get_extensions(type);
-        if(exts) {
-            for(const gchar* const *e = exts; *e != NULL; ++e) {
-                gchar* fold_ext = g_utf8_casefold(*e, -1);
-                if(!strcmp(file_ext, fold_ext)) {
-                    best_type = type;
+
+    void on_stream_error(GstBus* bus, GstMessage* message, VideoOutput::Data* user_data) {
+        g_main_loop_quit(user_data->loop);
+    }
+
+
+    void start_video_feed(GstElement* source, guint size, VideoOutput::Data* user_data) {
+        if(!user_data->push_source) {
+            user_data->push_source = g_idle_source_new();
+            g_source_set_callback(user_data->push_source, (GSourceFunc)push_video_data, user_data, NULL);
+            g_source_attach(user_data->push_source, g_main_loop_get_context(user_data->loop));
+        }
+    }
+
+
+    void stop_video_feed(GstElement* source, VideoOutput::Data* user_data) {
+        if(user_data->push_source) {
+            g_source_destroy(user_data->push_source);
+            user_data->push_source = NULL;
+        }
+    }
+
+
+    GstCaps* get_caps_for_file(const std::string& filename) {
+        // Extract file extension
+        size_t last_period = filename.rfind('.');
+        gchar* file_ext;
+        if(last_period >= filename.size()) {
+            file_ext = g_utf8_casefold("avi", 3);
+        }
+        else {
+            file_ext = g_utf8_casefold(&filename[last_period + 1], filename.size() - last_period - 1);
+        }
+
+        // Find typefinder of highest rank associated with the extension
+        GstTypeFindFactory* best_type = NULL;
+        GList* all_types = gst_type_find_factory_get_list();
+        for(GList* l = all_types; l && !best_type; l = l->next) {
+            GstTypeFindFactory *type = GST_TYPE_FIND_FACTORY(l->data);
+            const gchar* const *exts = gst_type_find_factory_get_extensions(type);
+            if(exts) {
+                for(const gchar* const *e = exts; *e != NULL; ++e) {
+                    gchar* fold_ext = g_utf8_casefold(*e, -1);
+                    if(!strcmp(file_ext, fold_ext)) {
+                        best_type = type;
+                        break;
+                    }
+                    g_free(fold_ext);
+                }
+            }
+        }
+
+        // Obtain caps for this file type
+        GstCaps* caps = best_type ? gst_caps_copy(gst_type_find_factory_get_caps(best_type)) : NULL;
+
+#ifndef NDEBUG
+        if(caps) {
+            gchar* name = gst_caps_to_string(caps);
+            std::cout << "AUTOPLUGGER: detected file caps as '" << name << '\'' << std::endl;
+            g_free(name);
+        }
+#endif
+
+        // Free allocated resources
+        gst_plugin_feature_list_free(all_types);
+        g_free(file_ext);
+
+        return caps;
+    }
+
+
+    GstElement* create_bin_for_caps(const GstCaps* file_caps) {
+        // Get a list of all muxer elements that can source the desired type
+        GList* all_muxers = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_MUXER, GST_RANK_MARGINAL);
+        GList* muxers = gst_element_factory_list_filter(all_muxers, file_caps, GST_PAD_SRC, FALSE);
+        gst_plugin_feature_list_free(all_muxers);
+
+        // Sort muxers by rank
+        muxers = g_list_sort(muxers, gst_plugin_feature_rank_compare_func);
+
+        // Obtain a list of all video encoders that can sink the desired type
+        GList* encoders = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_ENCODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO, GST_RANK_MARGINAL);
+
+        // Try all muxers in order of preference
+        GstElementFactory* selected_muxer = NULL;
+        GstElementFactory* selected_encoder = NULL;
+        for(GList* it = muxers; it != NULL; it = it->next) {
+            // Obtain the element factory of the current muxer
+            GstElementFactory* muxer_factory = GST_ELEMENT_FACTORY(it->data);
+
+            // Find static pad templates for the muxer
+            const GList* pad_templates = gst_element_factory_get_static_pad_templates(muxer_factory);
+            const GList* it_pad;
+            for(it_pad = pad_templates; it_pad != NULL; it_pad = it_pad->next) {
+                GstStaticPadTemplate* tmpl = (GstStaticPadTemplate*)it_pad->data;
+
+                // Only consider sink pads
+                if(tmpl->direction != GST_PAD_SINK) {
+                    continue;
+                }
+
+                // Filter all encoders that can attach to this pad
+                GstCaps* pad_caps = gst_static_caps_get(&tmpl->static_caps);
+                GList* pad_encoders = gst_element_factory_list_filter(encoders, pad_caps, GST_PAD_SRC, FALSE);
+                gst_caps_unref(pad_caps);
+
+                // Pick the highest ranked encoder
+                guint highest_rank = GST_RANK_NONE;
+                for(GList* it_enc = pad_encoders; it_enc != NULL; it_enc = it_enc->next) {
+                    GstElementFactory* enc = GST_ELEMENT_FACTORY(it_enc->data);
+                    guint rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(enc));
+                    if(rank > highest_rank) {
+                        selected_encoder = enc;
+                        highest_rank = rank;
+                    }
+                }
+
+                // Free the pad-specific encoder list
+                gst_plugin_feature_list_free(pad_encoders);
+
+                // Terminate search if an encoder has been found
+                if(selected_encoder) {
                     break;
                 }
-                g_free(fold_ext);
-            }
-        }
-    }
-
-    // Obtain caps for this file type
-    GstCaps* caps = best_type ? gst_caps_copy(gst_type_find_factory_get_caps(best_type)) : NULL;
-
-#ifndef NDEBUG
-    if(caps) {
-        gchar* name = gst_caps_to_string(caps);
-        std::cout << "AUTOPLUGGER: detected file caps as '" << name << '\'' << std::endl;
-        g_free(name);
-    }
-#endif
-
-    // Free allocated resources
-    gst_plugin_feature_list_free(all_types);
-    g_free(file_ext);
-
-    return caps;
-}
-
-
-GstElement* create_bin_for_caps(const GstCaps* file_caps) {
-    // Get a list of all muxer elements that can source the desired type
-    GList* all_muxers = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_MUXER, GST_RANK_MARGINAL);
-    GList* muxers = gst_element_factory_list_filter(all_muxers, file_caps, GST_PAD_SRC, FALSE);
-    gst_plugin_feature_list_free(all_muxers);
-
-    // Sort muxers by rank
-    muxers = g_list_sort(muxers, gst_plugin_feature_rank_compare_func);
-
-    // Obtain a list of all video encoders that can sink the desired type
-    GList* encoders = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_ENCODER | GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO, GST_RANK_MARGINAL);
-
-    // Try all muxers in order of preference
-    GstElementFactory* selected_muxer = NULL;
-    GstElementFactory* selected_encoder = NULL;
-    for(GList* it = muxers; it != NULL; it = it->next) {
-        // Obtain the element factory of the current muxer
-        GstElementFactory* muxer_factory = GST_ELEMENT_FACTORY(it->data);
-
-        // Find static pad templates for the muxer
-        const GList* pad_templates = gst_element_factory_get_static_pad_templates(muxer_factory);
-        const GList* it_pad;
-        for(it_pad = pad_templates; it_pad != NULL; it_pad = it_pad->next) {
-            GstStaticPadTemplate* tmpl = (GstStaticPadTemplate*)it_pad->data;
-
-            // Only consider sink pads
-            if(tmpl->direction != GST_PAD_SINK) {
-                continue;
             }
 
-            // Filter all encoders that can attach to this pad
-            GstCaps* pad_caps = gst_static_caps_get(&tmpl->static_caps);
-            GList* pad_encoders = gst_element_factory_list_filter(encoders, pad_caps, GST_PAD_SRC, FALSE);
-            gst_caps_unref(pad_caps);
-
-            // Pick the highest ranked encoder
-            guint highest_rank = GST_RANK_NONE;
-            for(GList* it_enc = pad_encoders; it_enc != NULL; it_enc = it_enc->next) {
-                GstElementFactory* enc = GST_ELEMENT_FACTORY(it_enc->data);
-                guint rank = gst_plugin_feature_get_rank(GST_PLUGIN_FEATURE(enc));
-                if(rank > highest_rank) {
-                    selected_encoder = enc;
-                    highest_rank = rank;
-                }
-            }
-
-            // Free the pad-specific encoder list
-            gst_plugin_feature_list_free(pad_encoders);
-
-            // Terminate search if an encoder has been found
+            // Terminate search if a suitable encoder is found
             if(selected_encoder) {
+                selected_muxer = muxer_factory;
                 break;
             }
         }
 
-        // Terminate search if a suitable encoder is found
-        if(selected_encoder) {
-            selected_muxer = muxer_factory;
-            break;
+        // Free the remaining plugin feature lists
+        gst_plugin_feature_list_free(encoders);
+        gst_plugin_feature_list_free(muxers);
+
+        // Return NULL if there is no suitable encoder
+        if(!selected_encoder) {
+            return NULL;
         }
-    }
 
-    // Free the remaining plugin feature lists
-    gst_plugin_feature_list_free(encoders);
-    gst_plugin_feature_list_free(muxers);
-
-    // Return NULL if there is no suitable encoder
-    if(!selected_encoder) {
-        return NULL;
-    }
-
-    // Report selected encoder and muxer
+        // Report selected encoder and muxer
 #ifndef NDEBUG
-    std::cout << "AUTOPLUGGER: selected encoder '" << gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(selected_encoder)) << "'\n"
-        << "AUTOPLUGGER: selected muxer '" << gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(selected_muxer)) << '\'' << std::endl;
+        std::cout << "AUTOPLUGGER: selected encoder '" << gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(selected_encoder)) << "'\n"
+            << "AUTOPLUGGER: selected muxer '" << gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(selected_muxer)) << '\'' << std::endl;
 #endif
 
-    // Create encoder and muxer and add them to a bin
-    GstElement* bin = gst_bin_new("encodebin");
-    GstElement* encoder = gst_element_factory_create(selected_encoder, "video-encoder");
-    GstElement* muxer = gst_element_factory_create(selected_muxer, "format-muxer");
+        // Create encoder and muxer and add them to a bin
+        GstElement* bin = gst_bin_new("encodebin");
+        GstElement* encoder = gst_element_factory_create(selected_encoder, "video-encoder");
+        GstElement* muxer = gst_element_factory_create(selected_muxer, "format-muxer");
 
-    // Fill the bin and link the elements
-    gst_bin_add_many(GST_BIN(bin), encoder, muxer, NULL);
-    gst_element_link(encoder, muxer);
+        // Fill the bin and link the elements
+        gst_bin_add_many(GST_BIN(bin), encoder, muxer, NULL);
+        gst_element_link(encoder, muxer);
 
-    // Create ghost pads for all sources and sinks
-    GstIteratorResult r;
-    bool done = false;
-    GValue item = G_VALUE_INIT;
-    GstIterator* src_pads = gst_element_iterate_src_pads(muxer);
-    while(!done) {
-        switch(r = gst_iterator_next(src_pads, &item)) {
-            case GST_ITERATOR_RESYNC:
-                gst_iterator_resync(src_pads);
-                break;
-            case GST_ITERATOR_OK:
-                {
-                    GstPad* target = GST_PAD(g_value_get_object(&item));
-                    GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
-                    gst_element_add_pad(bin, ghost);
-                }
-                break;
-            case GST_ITERATOR_DONE:
-            case GST_ITERATOR_ERROR:
-                done = true;
+        // Create ghost pads for all sources and sinks
+        GstIteratorResult r;
+        bool done = false;
+        GValue item = G_VALUE_INIT;
+        GstIterator* src_pads = gst_element_iterate_src_pads(muxer);
+        while(!done) {
+            switch(r = gst_iterator_next(src_pads, &item)) {
+                case GST_ITERATOR_RESYNC:
+                    gst_iterator_resync(src_pads);
+                    break;
+                case GST_ITERATOR_OK:
+                    {
+                        GstPad* target = GST_PAD(g_value_get_object(&item));
+                        GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
+                        gst_element_add_pad(bin, ghost);
+                    }
+                    break;
+                case GST_ITERATOR_DONE:
+                case GST_ITERATOR_ERROR:
+                    done = true;
+            }
         }
-    }
-    g_value_unset(&item);
-    gst_iterator_free(src_pads);
+        g_value_unset(&item);
+        gst_iterator_free(src_pads);
 
-    done = false;
-    item = G_VALUE_INIT;
-    GstIterator* sink_pads = gst_element_iterate_sink_pads(encoder);
-    while(!done) {
-        switch(r = gst_iterator_next(sink_pads, &item)) {
-            case GST_ITERATOR_RESYNC:
-                gst_iterator_resync(sink_pads);
-                break;
-            case GST_ITERATOR_OK:
-                {
-                    GstPad* target = GST_PAD(g_value_get_object(&item));
-                    GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
-                    gst_element_add_pad(bin, ghost);
-                }
-                break;
-            case GST_ITERATOR_DONE:
-            case GST_ITERATOR_ERROR:
-                done = true;
+        done = false;
+        item = G_VALUE_INIT;
+        GstIterator* sink_pads = gst_element_iterate_sink_pads(encoder);
+        while(!done) {
+            switch(r = gst_iterator_next(sink_pads, &item)) {
+                case GST_ITERATOR_RESYNC:
+                    gst_iterator_resync(sink_pads);
+                    break;
+                case GST_ITERATOR_OK:
+                    {
+                        GstPad* target = GST_PAD(g_value_get_object(&item));
+                        GstPad* ghost = gst_ghost_pad_new(gst_pad_get_name(target), target);
+                        gst_element_add_pad(bin, ghost);
+                    }
+                    break;
+                case GST_ITERATOR_DONE:
+                case GST_ITERATOR_ERROR:
+                    done = true;
+            }
         }
-    }
-    g_value_unset(&item);
-    gst_iterator_free(sink_pads);
+        g_value_unset(&item);
+        gst_iterator_free(sink_pads);
 
-    return bin;
+        return bin;
+    }
 }
 
 
@@ -295,17 +418,24 @@ VideoOutput::VideoOutput()
     : d_(),
       fps_n(30),
       fps_d(1),
-      cond_n(1),
-      cond_d(1),
       width(1920),
       height(1080),
-      clock_adj(0.0),
       file("vbcrender.avi"),
-      clock(false),
-      bounds(false),
       text_halign(0),
       text_valign(2)
 {}
+
+
+
+
+bool VideoOutput::get_clock() const {
+    return clock;
+}
+
+
+bool VideoOutput::get_bounds() const {
+    return bounds;
+}
 
 
 double VideoOutput::get_frame_time() const {
@@ -318,12 +448,37 @@ double VideoOutput::get_stream_time() const {
 }
 
 
+double VideoOutput::get_buffer_time() const {
+    return double(d_->buffer_time) / double(GST_SECOND);
+}
+
+
+double VideoOutput::get_clock_time() const {
+    return clock_adj + double(d_->stream_time * cond_d) / double(GST_SECOND * cond_n);
+}
+
+
 size_t VideoOutput::get_num_frames() const {
     return size_t(d_->num_frames);
 }
 
 
-void VideoOutput::set_frame_rate(size_t num, size_t den) {
+std::pair<uint64_t, uint64_t> VideoOutput::get_frame_rate() const {
+    return std::make_pair(fps_n, fps_d);
+}
+
+
+std::pair<uint64_t, uint64_t> VideoOutput::get_time_condensation() const {
+    return std::make_pair(cond_n, cond_d);
+}
+
+
+double VideoOutput::get_time_adjustment() const {
+    return clock_adj;
+}
+
+
+void VideoOutput::set_frame_rate(uint64_t num, uint64_t den) {
     if(d_) {
         throw std::logic_error("attempt to set frame rate after rendering started");
     }
@@ -333,7 +488,7 @@ void VideoOutput::set_frame_rate(size_t num, size_t den) {
 }
 
 
-void VideoOutput::set_time_condensation(size_t num, size_t den) {
+void VideoOutput::set_time_condensation(uint64_t num, uint64_t den) {
     if(d_) {
         throw std::logic_error("attempt to set time condensation factor after rendering started");
     }
@@ -400,13 +555,24 @@ void VideoOutput::set_text_align(size_t halign, size_t valign) {
 
 
 void VideoOutput::start() {
+    static const char* const format_table[] = {
+        "RGBx",     // Format_RGBx_8888
+        "xBGR",     // Format_xBGR_8888
+        "xRGB",     // Format_xRGB_8888
+        "BGRx",     // Format_BGRx_8888
+        "RGBA",     // Format_RGBA_8888
+        "ABGR",     // Format_ABGR_8888
+        "ARGB",     // Format_ARGB_8888
+        "BGRA",     // Format_BGRA_8888
+    };
+
     // Set up rendering pipeline if not yet created
     if(!d_) {
-        d_ = std::make_shared<Data>();
+        // Create internal data structure
+        d_ = std::make_shared<Data>(this);
 
-        // Create rendering surface and drawing context for Cairo
-        d_->surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, (int)width, (int)height);
-        d_->drawctx = cairo_create(d_->surface);
+        // Create renderer
+        d_->renderer = create_renderer(width, height);
 
         // Try to deduce output caps based on file extension
         GstCaps* output_caps = get_caps_for_file(file);
@@ -416,7 +582,7 @@ void VideoOutput::start() {
 
         // Define remaining caps
         GstCaps* input_video_caps = gst_caps_new_simple("video/x-raw",
-                "format", G_TYPE_STRING, is_big_endian() ? "xRGB" : "BGRx",
+                "format", G_TYPE_STRING, format_table[d_->renderer->get_pixel_format()],
                 "width", G_TYPE_INT, (int)width,
                 "height", G_TYPE_INT, (int)height,
                 "framerate", GST_TYPE_FRACTION, (int)fps_n, (int)fps_d,
@@ -445,9 +611,8 @@ void VideoOutput::start() {
 
         // Configure first elements and link where possible
         g_object_set(G_OBJECT(d_->vidsrc),
-                "block" , TRUE              ,
-                "caps"  , input_video_caps  ,
-                "format", GST_FORMAT_TIME   ,
+                "caps"  , input_video_caps,
+                "format", GST_FORMAT_TIME ,
                 NULL
                 );
         g_object_set(G_OBJECT(filesink),
@@ -485,7 +650,7 @@ void VideoOutput::start() {
         // Create buffer pool
         d_->pool = gst_buffer_pool_new();
         GstStructure* pool_conf = gst_buffer_pool_get_config(d_->pool);
-        gst_buffer_pool_config_set_params(pool_conf, input_video_caps, width * height * sizeof(uint32_t), 10, 100);
+        gst_buffer_pool_config_set_params(pool_conf, input_video_caps, width * height * sizeof(uint32_t), 0, 0);
         gst_buffer_pool_set_config(d_->pool, pool_conf);
         gst_buffer_pool_set_active(d_->pool, true);
         gst_caps_unref(input_video_caps);
@@ -494,14 +659,13 @@ void VideoOutput::start() {
         d_->frame_duration = gst_util_uint64_scale(1, fps_d * GST_SECOND, fps_n);
     }
 
-    // Wait for current render thread to die.
-    if(d_->r_thread.joinable()) {
-        d_->r_thread.join();
-    }
+    // Deactivate flush mode on renderer
+    d_->renderer->flush(false);
 
     // Spin off new render thread.
-    Data* data = d_.get();
-    d_->r_thread = std::thread([data]() {
+    std::shared_ptr<Data> data = d_;
+    std::thread([data]() {
+            // Wait until invoking thread has completed construction
             // Create new main context and main loop.
             GMainContext* mainctx = g_main_context_new();
             g_main_context_push_thread_default(mainctx);
@@ -511,12 +675,15 @@ void VideoOutput::start() {
             GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(data->pipeline));
             guint watch_id = gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
 
-            // Install termination callbacks
-            guint error_handler = g_signal_connect(bus, "message::error", (GCallback)on_stream_error, data);
-            guint eos_handler = g_signal_connect(bus, "message::eos", (GCallback)on_end_of_stream, data);
+            // Install signal handlers
+            guint error_handler    = g_signal_connect(bus         , "message::error", (GCallback)on_stream_error , data.get());
+            guint eos_handler      = g_signal_connect(bus         , "message::eos"  , (GCallback)on_end_of_stream, data.get());
+            guint data_req_handler = g_signal_connect(data->vidsrc, "need-data"     , (GCallback)start_video_feed, data.get());
+            guint data_sat_handler = g_signal_connect(data->vidsrc, "enough-data"   , (GCallback)stop_video_feed , data.get());
 
             // Reset timestamps and frame counts
             data->stream_time = 0;
+            data->buffer_time = 0;
             data->num_frames = 0;
 
             // Transition the pipeline to playing state
@@ -530,8 +697,10 @@ void VideoOutput::start() {
             gst_element_set_state(data->pipeline, GST_STATE_READY);
 
             // Remove termination callbacks
-            g_signal_handler_disconnect(bus, error_handler);
-            g_signal_handler_disconnect(bus, eos_handler);
+            g_signal_handler_disconnect(bus         , error_handler   );
+            g_signal_handler_disconnect(bus         , eos_handler     );
+            g_signal_handler_disconnect(data->vidsrc, data_req_handler);
+            g_signal_handler_disconnect(data->vidsrc, data_sat_handler);
 
             // Remove bus watch
             GSource* watch = g_main_context_find_source_by_id(mainctx, watch_id);
@@ -542,152 +711,26 @@ void VideoOutput::start() {
             g_main_context_pop_thread_default(mainctx);
             g_main_context_unref(mainctx);
             data->loop = NULL;
-    });
+    }).detach();
 }
 
 
-void VideoOutput::push_frame(TreePtr tree) {
-    // Constant for square root of 2
-#ifndef M_SQRT1_2
-    static const Scalar sqrt2_half = Scalar(M_SQRT1_2);
-#elif defined(M_SQRT2)
-    static const Scalar sqrt2_half = Scalar(1 / M_SQRT2);
-#else
-    static const Scalar sqrt2_half = std::sqrt(0.5);
-#endif
-
-    // Update layout and get tree and canvas bounding boxes
-    tree->update_layout();
-    Rect bbox = tree->bounding_box();
-    Rect window { 10, 10, Scalar(width - 10), Scalar(height - 10) };
-
-    // Adjust transformation to center tree
-    Scalar scale = std::min(
-            (window.x1 - window.x0) / (bbox.x1 - bbox.x0),
-            (window.y1 - window.y0) / (bbox.y1 - bbox.y0)
-            );
-    Scalar scaled_bbox_mid_x = 0.5 * scale * (bbox.x0 + bbox.x1);
-    Scalar scaled_bbox_mid_y = 0.5 * scale * (bbox.y0 + bbox.y1);
-    Scalar window_mid_x = 0.5 * (window.x0 + window.x1);
-    Scalar window_mid_y = 0.5 * (window.y0 + window.y1);
-
-    cairo_matrix_t matrix;
-    cairo_matrix_init(&matrix, scale, 0, 0, scale, window_mid_x - scaled_bbox_mid_x, window_mid_y - scaled_bbox_mid_y);
-    cairo_set_matrix(d_->drawctx, &matrix);
-
-    // Fill surface with background color
-    cairo_set_source_rgb(d_->drawctx, background_color.r, background_color.g, background_color.b);
-    cairo_set_operator(d_->drawctx, CAIRO_OPERATOR_OVER);
-    cairo_paint(d_->drawctx);
-
-    // Draw the tree with raster protection
-    tree->draw(d_->drawctx, true);
-
-    // Flush changes to rendering surface
-    cairo_surface_flush(d_->surface);
-
-    // Acquire a buffer from GStreamer
-    GstBuffer* buffer;
-    if(gst_buffer_pool_acquire_buffer(d_->pool, &buffer, NULL) != GST_FLOW_OK) {
-        throw std::runtime_error("failed to acquire buffer from pool");
+bool VideoOutput::push_frame(TreePtr tree) {
+    if(!d_) {
+        throw std::logic_error("tried to push frame before starting renderer");
     }
 
-    // Copy pixels to the buffer
-    GstMapInfo map_info;
-    if(!gst_buffer_map(buffer, &map_info, GST_MAP_WRITE)) {
-        gst_buffer_unref(buffer);
-        throw std::runtime_error("failed to map buffer for writing");
-    }
+    // Acquire lock
+    std::lock_guard<std::mutex> lock(d_->lock);
 
-    unsigned char* img_src = cairo_image_surface_get_data(d_->surface);
-    unsigned char* img_dst = map_info.data;
-    size_t row_size = width * sizeof(uint32_t);
-    size_t row_stride = cairo_image_surface_get_stride(d_->surface);
-    if(row_size == row_stride) {
-        std::memcpy(img_dst, img_src, height * row_size);
+    // Push frame into renderer
+    if(d_->renderer->push_frame(tree, false) == Renderer::Push_Success) {
+        d_->buffer_time += d_->frame_duration;
+        d_->bound_queue.emplace_back(tree->lower_bound(), tree->upper_bound());
+        return true;
     }
     else {
-        for(size_t row = 0; row < height; ++row) {
-            std::memcpy(img_dst + row * row_size, img_src + row * row_stride, row_size);
-        }
-    }
-
-    gst_buffer_unmap(buffer, &map_info);
-
-    // Attach timestamp information to the buffer
-    GST_BUFFER_DURATION(buffer) = d_->frame_duration;
-    GST_BUFFER_PTS(buffer) = d_->stream_time;
-
-    // Create a text buffer for the overlay
-    if(d_->txtsrc) {
-        std::ostringstream str;
-        bool empty = true;
-
-        if(clock) {
-            guint64 timestamp = GST_BUFFER_PTS(buffer);
-            if(clock_adj) {
-                timestamp += guint64(clock_adj * GST_SECOND);
-            }
-            if(cond_n != cond_d) {
-                timestamp = gst_util_uint64_scale(timestamp, cond_d, cond_n);
-            }
-
-            const auto fill = str.fill('0');
-            str << std::setw(2) << (timestamp / (3600 * GST_SECOND)) << ':'
-                << std::setw(2) << ((timestamp % (3600 * GST_SECOND)) / (60 * GST_SECOND)) << ':'
-                << std::setw(2) << ((timestamp % (60 * GST_SECOND)) / GST_SECOND) << '.'
-                << std::setw(3) << ((timestamp % GST_SECOND) / (GST_SECOND / 1000));
-            str.fill(fill);
-
-            empty = false;
-        }
-
-        if(bounds) {
-            double ub = tree->upper_bound();
-            double lb = tree->lower_bound();
-
-            if(std::isfinite(ub)) {
-                if(!empty) {
-                    str << '\n';
-                }
-                str << "UB = " << ub;
-                empty = false;
-            }
-
-            if(std::isfinite(lb)) {
-                if(!empty) {
-                    str << '\n';
-                }
-                str << "LB = " << lb;
-            }
-        }
-
-        // Create a buffer with the text data
-        std::string msg = str.str();
-        gchar* data = g_strndup(msg.c_str(), msg.size());
-        GstBuffer* txtbuf = gst_buffer_new_wrapped(data, msg.size());
-
-        // Set buffer metadata
-        GST_BUFFER_DURATION(txtbuf) = d_->frame_duration;
-        GST_BUFFER_PTS(txtbuf) = d_->stream_time;
-
-        // Push buffer into the pipeline
-        GstFlowReturn ret;
-        g_signal_emit_by_name(d_->txtsrc, "push-buffer", txtbuf, &ret);
-        gst_buffer_unref(txtbuf);
-    }
-
-    // Advance timestamps
-    d_->stream_time += d_->frame_duration;
-    ++d_->num_frames;
-
-    // Push buffer into the pipeline
-    GstFlowReturn ret;
-    g_signal_emit_by_name(d_->vidsrc, "push-buffer", buffer, &ret);
-    gst_buffer_unref(buffer);
-
-    if(ret != GST_FLOW_OK) {
-        throw std::runtime_error("could not push buffer to encoding pipeline");
+        return false;
     }
 }
 
@@ -697,12 +740,5 @@ void VideoOutput::stop(bool error) {
         return;
     }
 
-    GstFlowReturn ret;
-    g_signal_emit_by_name(d_->vidsrc, "end-of-stream", &ret);
-    if(ret != GST_FLOW_OK) {
-        throw std::runtime_error("failed to send end-of-stream signal");
-    }
-    if(d_->r_thread.joinable()) {
-        d_->r_thread.join();
-    }
+    d_->renderer->flush(true);
 }

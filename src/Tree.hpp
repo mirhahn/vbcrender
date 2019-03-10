@@ -85,6 +85,8 @@ public:
     size_t category() const { return cat_; }
     std::string main_info() const { return minfo_; }
     std::string general_info() const { return ginfo_; }
+    Scalar x() const { return x_; }
+    Scalar y() const { return y_; }
 
     void set_parent(NodeBase* parent);
     void set_category(size_t category) { cat_ = category; }
@@ -161,6 +163,7 @@ public:
 private:
     double lb_;                             ///< Global lower bound for objective function value
     double ub_;                             ///< Global upper bound for objective function value
+    size_t nvert_;                          ///< Number of vertices
     bool stale_;                            ///< Indicates that the layout needs to be updated
     Rect bbox_;                             ///< Bounding box determined by last layout
     std::vector<NodePtr> index_;            ///< Nodes by sequence number
@@ -169,6 +172,8 @@ public:
     Tree();
     Tree(const Tree&) = delete;
     Tree(Tree&&) = delete;
+
+    const std::vector<NodePtr>& seq_idx() const { return index_; }
 
     double lower_bound() const { return lb_; }
     double upper_bound() const { return ub_; }
@@ -182,7 +187,6 @@ public:
 
     void update_layout();
     Rect bounding_box() const { return bbox_; }
-    void draw(Canvas* canvas, bool raster_protect = false);
 };
 
 #endif /* end of include guard: __VBC_TREE_HPP */

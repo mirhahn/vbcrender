@@ -36,4 +36,6 @@ add_custom_target(generate_vbc_code
 set(VBC_GENERATED_FILES "${CMAKE_BINARY_DIR}/src/Styles.cpp")
 
 # Export variables to parent scope
+set(GLAD_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/opengl" PARENT_SCOPE)
+set(GLAD_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/opengl/glad/glad.c" PARENT_SCOPE)
 set(VBC_GENERATED_FILES "${VBC_GENERATED_FILES}" PARENT_SCOPE)
