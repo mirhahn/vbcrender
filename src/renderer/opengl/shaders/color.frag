@@ -1,5 +1,3 @@
-#version 330
-
 // Inputs
 in ColorBlock {
     flat vec3 color;

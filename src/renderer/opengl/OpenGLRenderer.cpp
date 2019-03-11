@@ -115,15 +115,19 @@ namespace {
             GLuint segments = M_PI / std::asin(0.5 / scaled_radius) - 1;
             if(segments < 4) {
                 segments = 4;
-                radius = std::max(radius, GLfloat(1.0) / scale);
             }
             else if(segments > 64) {
                 segments = 64;
             }
 
+            // Determine whether shape expansion is beneficial 
+            bool expand_shapes = radius * scale >= M_SQRT2;
+
             // Update shader parameters
             shaders.set_transform(scale, xtrans, ytrans);
-            shaders.update_shapes(radius, segments);
+            if(expand_shapes) {
+                shaders.update_shapes(radius, segments);
+            }
 
             // Draw lines
             if(!tree.line_indices.empty()) {
@@ -131,16 +135,22 @@ namespace {
                 glDrawElements(GL_LINES, tree.line_indices.size(), GL_UNSIGNED_INT, 0);
             }
 
-            // Draw filled markers
-            if(!tree.fill_indices.empty()) {
-                shaders.use_fill_program();
-                glDrawElements(GL_POINTS, tree.fill_indices.size(), GL_UNSIGNED_INT, (GLvoid*)(offs_fill * sizeof(GLuint)));
-            }
+            if(expand_shapes) {
+                // Draw filled markers
+                if(!tree.fill_indices.empty()) {
+                    shaders.use_fill_program();
+                    glDrawElements(GL_POINTS, tree.fill_indices.size(), GL_UNSIGNED_INT, (GLvoid*)(offs_fill * sizeof(GLuint)));
+                }
 
-            // Draw stroked markers
-            if(!tree.stroke_indices.empty()) {
-                shaders.use_stroke_program();
-                glDrawElements(GL_POINTS, tree.stroke_indices.size(), GL_UNSIGNED_INT, (GLvoid*)(offs_stroke * sizeof(GLuint)));
+                // Draw stroked markers
+                if(!tree.stroke_indices.empty()) {
+                    shaders.use_stroke_program();
+                    glDrawElements(GL_POINTS, tree.stroke_indices.size(), GL_UNSIGNED_INT, (GLvoid*)(offs_stroke * sizeof(GLuint)));
+                }
+            }
+            else if(!tree.fill_indices.empty() || !tree.stroke_indices.empty()) {
+                shaders.use_point_program();
+                glDrawElements(GL_POINTS, tree.fill_indices.size() + tree.stroke_indices.size(), GL_UNSIGNED_INT, (GLvoid*)(offs_fill * sizeof(GLuint)));
             }
         } catch(...) {
             eptr = std::current_exception();
@@ -196,6 +206,12 @@ namespace {
 
         // Invoke GLAD to load OpenGL
         gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+
+        // Perform some configuration
+        glLineWidth(1);
+        glPointSize(2);
+        glEnable(GL_MULTISAMPLE);
+        glEnable(GL_LINE_SMOOTH);
 
         // Relinquish OpenGL context
         glfwMakeContextCurrent(NULL);
@@ -425,7 +441,6 @@ Renderer::PullStatus OpenGLRenderer::pull_frame(void *data, size_t size, bool bl
 
         // Acquire the OpenGL context associated with the renderer
         glfwMakeContextCurrent(d_->window);
-        glEnable(GL_MULTISAMPLE);
 
         // Bind multisampling framebuffer for rendering
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d_->fbo[0]);

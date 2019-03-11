@@ -170,9 +170,9 @@ OpenGLShaders::OpenGLShaders()
 OpenGLShaders::~OpenGLShaders()
 {
     glDeleteBuffers(1, &buf_);
-    glDeleteProgram(prog_[0]);
-    glDeleteProgram(prog_[1]);
-    glDeleteProgram(prog_[2]);
+    for(size_t i = 0; i < Program_Count; ++i) {
+        glDeleteProgram(prog_[i]);
+    }
 }
 
 
@@ -187,11 +187,21 @@ void OpenGLShaders::build_shaders() {
     // Write headers for shaders
     std::ostringstream header;
     header << "#version 330\n"
-              "#define NUM_SHAPES 2u\n"
-              "#define NUM_VERT 64u\n"
-              "#define NUM_VERT_LOOP 65u\n"
-              "#define NUM_STYLES " << node_style_table.size() << "u\n";
-    std::string geom_hdr_str = header.str();
+              "\n"
+              "#define VSMODE_MARKER_NODE      0       // Pass style information to GS for shape expansion\n"
+              "#define VSMODE_PASSTHROUGH_EDGE 1       // Pass edge color directly to vertex post-processing for lines\n"
+              "#define VSMODE_PASSTHROUGH_NODE 2       // Pass node color directly to vertex post-processing for points\n"
+              "#define VSMODE_FILTER_EDGE      3       // Pass edge color to GS for filtering of short edges (currently unused)\n"
+              "\n"
+              "#define GSMODE_MARKER_FILL      0       // Marker shapes should be filled\n"
+              "#define GSMODE_MARKER_STROKE    1       // Marker shapes should be outlined\n"
+              "#define GSMODE_EDGE_FILTER      2       // GS should filter out lines that are too short (currently unused)\n"
+              "\n"
+              "#define NUM_STYLES              " << node_style_table.size() << "u\n"
+              "#define NUM_SHAPES              2u\n"
+              "#define NUM_VERTICES            64u\n"
+              "#define NUM_LOOP_VERTICES       65u\n";
+    std::string hdr_str = header.str();
 
     // Load shader code from resource files
     auto rc_fs = cmrc::shaders::get_filesystem();
@@ -200,34 +210,39 @@ void OpenGLShaders::build_shaders() {
     auto color_source       = rc_fs.open("color.frag"       );
 
     const std::vector<std::string> marker_transform_shader_code {
-        "#version 330\n"
-        "#define SKIP_GEOM 0\n",
+        hdr_str,
+        "#define VERTEX_SHADER_MODE VSMODE_MARKER_NODE\n",
         std::string(transform_source.begin(), transform_source.end())
     };
     const std::vector<std::string> line_transform_shader_code {
-        "#version 330\n"
-        "#define SKIP_GEOM 1\n",
+        hdr_str,
+        "#define VERTEX_SHADER_MODE VSMODE_PASSTHROUGH_EDGE\n",
+        std::string(transform_source.begin(), transform_source.end())
+    };
+    const std::vector<std::string> point_transform_shader_code {
+        hdr_str,
+        "#define VERTEX_SHADER_MODE VSMODE_PASSTHROUGH_NODE\n",
         std::string(transform_source.begin(), transform_source.end())
     };
     const std::vector<std::string> stroke_shader_code {
-        geom_hdr_str,
-        "#define PRIM_TYPE line_strip\n"
-        "#define CLOSE_LOOP 1\n",
+        hdr_str,
+        "#define GEOMETRY_SHADER_MODE GSMODE_MARKER_STROKE\n",
         std::string(marker_source.begin(), marker_source.end())
     };
     const std::vector<std::string> fill_shader_code {
-        geom_hdr_str,
-        "#define PRIM_TYPE triangle_strip\n"
-        "#define CLOSE_LOOP 0\n",
+        hdr_str,
+        "#define GEOMETRY_SHADER_MODE GSMODE_MARKER_FILL\n",
         std::string(marker_source.begin(), marker_source.end())
     };
     const std::vector<std::string> color_shader_code {
+        hdr_str,
         std::string(color_source.begin(), color_source.end())
     };
 
     // Initialize shader object names to 0
     GLuint marker_transform_shader = 0;
     GLuint line_transform_shader   = 0;
+    GLuint point_transform_shader  = 0;
     GLuint stroke_shader           = 0;
     GLuint fill_shader             = 0;
     GLuint color_shader            = 0;
@@ -237,6 +252,7 @@ void OpenGLShaders::build_shaders() {
         // Build individual shaders
         marker_transform_shader = compile_shader_source(GL_VERTEX_SHADER,   marker_transform_shader_code);
         line_transform_shader   = compile_shader_source(GL_VERTEX_SHADER,   line_transform_shader_code  );
+        point_transform_shader  = compile_shader_source(GL_VERTEX_SHADER,   point_transform_shader_code );
         stroke_shader           = compile_shader_source(GL_GEOMETRY_SHADER, stroke_shader_code          );
         fill_shader             = compile_shader_source(GL_GEOMETRY_SHADER, fill_shader_code            );
         color_shader            = compile_shader_source(GL_FRAGMENT_SHADER, color_shader_code           );
@@ -248,12 +264,17 @@ void OpenGLShaders::build_shaders() {
 
         // Link fill program
         if(!prog_[Program_Fill]) {
-            prog_[Program_Fill] = link_program({ marker_transform_shader, fill_shader  , color_shader });
+            prog_[Program_Fill]  = link_program({ marker_transform_shader , fill_shader  , color_shader });
         }
 
         // Link line program
         if(!prog_[Program_Line]) {
-            prog_[Program_Line] = link_program({ line_transform_shader  ,                color_shader });
+            prog_[Program_Line]  = link_program({ line_transform_shader   ,                color_shader });
+        }
+
+        // Link point program
+        if(!prog_[Program_Point]) {
+            prog_[Program_Point] = link_program({ point_transform_shader  ,                color_shader });
         }
     } catch(...) {
         eptr = std::current_exception();
@@ -262,6 +283,7 @@ void OpenGLShaders::build_shaders() {
     // Delete shaders
     if(marker_transform_shader) glDeleteShader(marker_transform_shader);
     if(line_transform_shader  ) glDeleteShader(line_transform_shader  );
+    if(point_transform_shader ) glDeleteShader(point_transform_shader );
     if(stroke_shader          ) glDeleteShader(stroke_shader          );
     if(fill_shader            ) glDeleteShader(fill_shader            );
     if(color_shader           ) glDeleteShader(color_shader           );
@@ -382,6 +404,17 @@ void OpenGLShaders::bind_buffers() {
         },
         buffer_size
     );
+    create_interface_block_bindings(prog_[Program_Point], {
+            { "TransformBlock", Block_Transform },
+            { "NodeBlock"     , Block_NodeStyle },
+        }, {
+            { "scale"              , Uniform_Transform_Scale      },
+            { "translate"          , Uniform_Transform_Translate  },
+            { "shape_table"        , Uniform_NodeStyle_ShapeTable },
+            { "color_table"        , Uniform_NodeStyle_ColorTable },
+        },
+        buffer_size
+    );
 
     // Create new uniform buffer
     glGenBuffers(1, &buf_);
@@ -443,6 +476,11 @@ void OpenGLShaders::use_fill_program() {
 
 void OpenGLShaders::use_stroke_program() {
     glUseProgram(prog_[Program_Stroke]);
+}
+
+
+void OpenGLShaders::use_point_program() {
+    glUseProgram(prog_[Program_Point]);
 }
 
 

@@ -51,8 +51,9 @@ public:
         Program_Stroke = 0,
         Program_Fill   = 1,
         Program_Line   = 2,
+        Program_Point  = 3,
 
-        Program_Count  = 3
+        Program_Count  = 4
     };
 
     enum Block {
@@ -83,7 +84,7 @@ public:
     };
 
 private:
-    GLuint prog_[3];                            ///< Shader programs
+    GLuint prog_[Program_Count];                ///< Shader programs
     GLuint buf_;                                ///< Uniform block buffer
 
     GLint boff_[Block_Count];                   ///< Buffer offsets for uniform blocks
@@ -107,6 +108,7 @@ public:
     void use_stroke_program();
     void use_fill_program();
     void use_line_program();
+    void use_point_program();
 
     void set_transform(GLfloat scale, GLfloat xtrans, GLfloat ytrans);
     void update_shapes(GLfloat radius, GLuint segments);
