@@ -49,18 +49,33 @@ public:
 
 protected:
     ChildrenList children_;     ///< List of children
+    bool         stale_;        ///< Layout has to be redone
 
 public:
+    NodeBase() : stale_(true) {}
     virtual ~NodeBase() {}
 
     ChildrenList& children() { return children_; }
     const ChildrenList& children() const { return children_; }
+
+    /// Indicates whether the layout is stale
+    bool is_stale() const { return stale_; }
+
+    /// Marks this subtree (and its ancestors) as stale
+    void mark_stale();
+
+    /// Recursively updates local layout for stale descendants
+    void local_layout();
+
+    /// Aggregates local layout information of the forest of descendants
+    void aggregate_layout(Rect& bbox);
 };
 
 
 class Node : public NodeBase, public std::enable_shared_from_this<Node> {
 private:
     friend class Tree;
+    friend class NodeBase;
 
     NodeBase* parent_;          ///< Parent node
     ChildrenIterator childpos_; ///< Corresponding iterator in parent's children list.
@@ -74,6 +89,8 @@ private:
     Scalar x_;                  ///< X coordinate
     Scalar y_;                  ///< Y coordinate
     Scalar xshft_;              ///< X shift of subtree
+    Scalar xshftacc_;           ///< Cumulative X shift
+    Scalar xpre_;               ///< Preliminary X coordinate
 
 public:
     Node(size_t seqnum);
@@ -165,7 +182,7 @@ private:
     double ub_;                             ///< Global upper bound for objective function value
     size_t nvert_;                          ///< Number of vertices
     bool stale_;                            ///< Indicates that the layout needs to be updated
-    Rect bbox_;                             ///< Bounding box determined by last layout
+    Rect bbox_;
     std::vector<NodePtr> index_;            ///< Nodes by sequence number
 
 public:
@@ -175,6 +192,7 @@ public:
 
     const std::vector<NodePtr>& seq_idx() const { return index_; }
 
+    Rect bounding_box() const { return bbox_; }
     double lower_bound() const { return lb_; }
     double upper_bound() const { return ub_; }
     void set_lower_bound(double bound) { lb_ = bound; }
@@ -186,7 +204,6 @@ public:
     void set_category(size_t node, size_t category);
 
     void update_layout();
-    Rect bounding_box() const { return bbox_; }
 };
 
 #endif /* end of include guard: __VBC_TREE_HPP */
