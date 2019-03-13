@@ -22,6 +22,7 @@
 #include "VideoOutput.hpp"
 
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -566,6 +567,11 @@ void VideoOutput::start() {
         "BGRA",     // Format_BGRA_8888
     };
 
+    // Worker thread and synchronization primitives
+    std::thread             worker;
+    std::mutex              handshake;
+    std::condition_variable init_complete;
+
     // Set up rendering pipeline if not yet created
     if(!d_) {
         // Create internal data structure
@@ -663,55 +669,72 @@ void VideoOutput::start() {
     d_->renderer->flush(false);
 
     // Spin off new render thread.
-    std::shared_ptr<Data> data = d_;
-    std::thread([data]() {
-            // Wait until invoking thread has completed construction
-            // Create new main context and main loop.
-            GMainContext* mainctx = g_main_context_new();
-            g_main_context_push_thread_default(mainctx);
-            data->loop = g_main_loop_new(mainctx, FALSE);
+    {
+        // Acquire the handshake lock
+        std::unique_lock<std::mutex> lock(handshake);
 
-            // Install watch on GStreamer bus
-            GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(data->pipeline));
-            guint watch_id = gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
+        // Start the render thread
+        worker = std::thread([&handshake, &init_complete](std::shared_ptr<Data> data) {
+                // Wait until invoking thread has completed construction
+                // Create new main context and main loop.
+                GMainContext* mainctx = g_main_context_new();
+                g_main_context_push_thread_default(mainctx);
+                data->loop = g_main_loop_new(mainctx, FALSE);
 
-            // Install signal handlers
-            guint error_handler    = g_signal_connect(bus         , "message::error", (GCallback)on_stream_error , data.get());
-            guint eos_handler      = g_signal_connect(bus         , "message::eos"  , (GCallback)on_end_of_stream, data.get());
-            guint data_req_handler = g_signal_connect(data->vidsrc, "need-data"     , (GCallback)start_video_feed, data.get());
-            guint data_sat_handler = g_signal_connect(data->vidsrc, "enough-data"   , (GCallback)stop_video_feed , data.get());
+                // Install watch on GStreamer bus
+                GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(data->pipeline));
+                guint watch_id = gst_bus_add_watch(bus, gst_bus_async_signal_func, NULL);
 
-            // Reset timestamps and frame counts
-            data->stream_time = 0;
-            data->buffer_time = 0;
-            data->num_frames = 0;
+                // Install signal handlers
+                guint error_handler    = g_signal_connect(bus         , "message::error", (GCallback)on_stream_error , data.get());
+                guint eos_handler      = g_signal_connect(bus         , "message::eos"  , (GCallback)on_end_of_stream, data.get());
+                guint data_req_handler = g_signal_connect(data->vidsrc, "need-data"     , (GCallback)start_video_feed, data.get());
+                guint data_sat_handler = g_signal_connect(data->vidsrc, "enough-data"   , (GCallback)stop_video_feed , data.get());
 
-            // Transition the pipeline to playing state
-            gst_element_set_state(data->pipeline, GST_STATE_READY);
-            gst_element_set_state(data->pipeline, GST_STATE_PLAYING);
+                // Reset timestamps and frame counts
+                data->stream_time = 0;
+                data->buffer_time = 0;
+                data->num_frames = 0;
 
-            // Run the main loop
-            g_main_loop_run(data->loop);
+                // Transition the pipeline to playing state
+                gst_element_set_state(data->pipeline, GST_STATE_READY);
+                gst_element_set_state(data->pipeline, GST_STATE_PLAYING);
 
-            // Transition the pipeline to ready state
-            gst_element_set_state(data->pipeline, GST_STATE_READY);
+                // Acquire handshake lock and notify calling thread that initialization is complete
+                // WARNING: After this, handshake and init_complete may go out of scope and become
+                //          dangling references!!!
+                {
+                    std::unique_lock<std::mutex> lock(handshake);
+                    init_complete.notify_all();
+                }
 
-            // Remove termination callbacks
-            g_signal_handler_disconnect(bus         , error_handler   );
-            g_signal_handler_disconnect(bus         , eos_handler     );
-            g_signal_handler_disconnect(data->vidsrc, data_req_handler);
-            g_signal_handler_disconnect(data->vidsrc, data_sat_handler);
+                // Run the main loop
+                g_main_loop_run(data->loop);
 
-            // Remove bus watch
-            GSource* watch = g_main_context_find_source_by_id(mainctx, watch_id);
-            g_source_destroy(watch);
+                // Transition the pipeline to ready state
+                gst_element_set_state(data->pipeline, GST_STATE_READY);
 
-            // Destroy main context and main loop
-            g_main_loop_unref(data->loop);
-            g_main_context_pop_thread_default(mainctx);
-            g_main_context_unref(mainctx);
-            data->loop = NULL;
-    }).detach();
+                // Remove termination callbacks
+                g_signal_handler_disconnect(bus         , error_handler   );
+                g_signal_handler_disconnect(bus         , eos_handler     );
+                g_signal_handler_disconnect(data->vidsrc, data_req_handler);
+                g_signal_handler_disconnect(data->vidsrc, data_sat_handler);
+
+                // Remove bus watch
+                GSource* watch = g_main_context_find_source_by_id(mainctx, watch_id);
+                g_source_destroy(watch);
+
+                // Destroy main context and main loop
+                g_main_loop_unref(data->loop);
+                g_main_context_pop_thread_default(mainctx);
+                g_main_context_unref(mainctx);
+                data->loop = NULL;
+        }, d_);
+        worker.detach();
+
+        // Wait for completion of render thread initialization
+        init_complete.wait(lock);
+    }
 }
 
 
