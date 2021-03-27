@@ -10,7 +10,7 @@ set(VBC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vbctool")
 # Add custom target for VBCTool
 add_custom_command(OUTPUT ${VBC_DIR}/vbcLinux.tgz
         COMMAND ${CMAKE_COMMAND} -E make_directory "${VBC_DIR}"
-        COMMAND ${WGET_EXECUTABLE} --no-check-certificate -O "vbctool/vbcLinux.tgz" https://informatik.uni-koeln.de/fileadmin/projects/vbctool/vbcLinux.tgz
+        COMMAND ${WGET_EXECUTABLE} --no-check-certificate -O "vbctool/vbcLinux.tgz" https://cs.uni-koeln.de/sites/informatik/projects/vbctool/vbcLinux.tgz
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
 	COMMENT "Downloading VBCTOOL package"
 )
