@@ -13,9 +13,9 @@ VbcRender makes extensive use of the [Cairo](https://www.cairographics.org), [GL
 The required library and program versions are:
 
 ```
-Boost >= 1.46
+Boost >= 1.70
 Cairo >= 1.2
-CMake >= 3.1
+CMake >= 3.30
 GLib >= 2.0
 GStreamer >= 1.0
 ```

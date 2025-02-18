@@ -21,17 +21,12 @@
 #include <limits>
 #include <sstream>
 #include <typeindex>
-#include <typeinfo>
 
-#include <boost/filesystem.hpp>
 #include <boost/iostreams/filtering_stream.hpp>
 #include <boost/iostreams/device/file.hpp>
-#include <boost/iostreams/filter/bzip2.hpp>
-#include <boost/iostreams/filter/gzip.hpp>
 
 #include "VbcReader.hpp"
 
-namespace bfs = boost::filesystem;
 namespace bio = boost::iostreams;
 
 
@@ -96,13 +91,6 @@ void VbcReader::read_file(std::string filename) {
     bio::filtering_istream in;
 
     // Build pipeline based on file extensions
-    std::string ext = bfs::extension(filename);
-    if(ext == ".gz" || ext == ".GZ") {
-        in.push(bio::gzip_decompressor());
-    }
-    else if(ext == ".bz2" || ext == ".BZ2") {
-        in.push(bio::bzip2_decompressor());
-    }
     in.push(bio::file_source(filename));
 
     // Test if file was successfully opened

@@ -21,10 +21,10 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <forward_list>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <thread>
 
 #include "Event.hpp"

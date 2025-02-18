@@ -24,6 +24,7 @@
 #include <sstream>
 #include <unordered_map>
 
+#define BOOST_FILESYSTEM_NO_DEPRECATED
 #include <boost/filesystem.hpp>
 #include <boost/program_options.hpp>
 #include <gst/gst.h>
@@ -102,26 +103,25 @@ void parse_fraction(const std::string& str, size_t& num, size_t& den) {
     std::istringstream in(str);
 
     // Read numerator
-    in >> std::ws >> num >> std::ws;
+    in >> std::ws >> num;
     if(in.bad() || in.fail()) {
         throw std::invalid_argument("not a valid fraction");
     }
-    else if(in.eof()) {
-        den = 1;
+    den = 1;
+
+    // Stop if no denominator exists
+    if(in.eof()) {
         return;
     }
 
-    // Check if denominator exists
+    // Check if next character is a slash
+    in >> std::ws;
     auto ch = in.get();
     if(ch == '/') {
-        in >> std::ws >> den >> std::ws;
-    }
-    else {
-        throw std::invalid_argument("not a valid fraction");
-    }
-
-    if(in.bad() || in.fail()) {
-        throw std::invalid_argument("not a valid fraction");
+        in >> den;
+        if(in.bad() || in.fail()) {
+            throw std::invalid_argument("not a valid fraction");
+        }
     }
 }
 

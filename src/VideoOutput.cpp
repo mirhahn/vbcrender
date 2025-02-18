@@ -407,6 +407,7 @@ void VideoOutput::start() {
         // Create rendering surface and drawing context for Cairo
         d_->surface = cairo_image_surface_create(CAIRO_FORMAT_RGB24, (int)width, (int)height);
         d_->drawctx = cairo_create(d_->surface);
+        cairo_set_antialias(d_->drawctx, CAIRO_ANTIALIAS_BEST);
 
         // Try to deduce output caps based on file extension
         GstCaps* output_caps = get_caps_for_file(file);

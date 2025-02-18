@@ -18,6 +18,8 @@
 
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <stdexcept>
 
 #include <cairo.h>
 
